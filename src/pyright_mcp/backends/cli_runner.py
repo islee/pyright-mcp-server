@@ -118,7 +118,7 @@ class PyrightCLIRunner:
         For the CLI backend, this is a no-op since each invocation is stateless.
         This method exists to satisfy the Backend protocol for Phase 2 compatibility.
         """
-        pass  # CLI backend is stateless, no cleanup needed
+        # CLI backend is stateless, no cleanup needed
 
 
 def build_pyright_command(
@@ -266,7 +266,7 @@ def parse_pyright_output(stdout: str, stderr: str, return_code: int) -> Diagnost
         }
         severity_code = diag.get("severity", 1)
         severity_str = severity_map.get(severity_code, "error")
-        severity = cast(Literal["error", "warning", "information", "hint"], severity_str)
+        severity = cast("Literal['error', 'warning', 'information', 'hint']", severity_str)
 
         # Parse range (0-indexed positions from Pyright)
         range_data = diag.get("range", {})

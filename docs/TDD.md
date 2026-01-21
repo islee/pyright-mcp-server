@@ -70,18 +70,24 @@ This document describes the technical design for pyright-mcp, an MCP server that
 
 ## 3. Position Indexing Convention
 
-**All positions in pyright-mcp use 0-indexed line and column numbers.**
+**MCP Tool API uses 1-indexed positions. Internal data structures use 0-indexed.**
 
 | Component | Line | Column | Notes |
 |-----------|------|--------|-------|
-| MCP Tool API | 0-indexed | 0-indexed | External interface |
+| MCP Tool API | 1-indexed | 1-indexed | External interface (user-friendly) |
 | Internal data structures | 0-indexed | 0-indexed | Diagnostic, Location, Range |
 | Pyright CLI JSON | 0-indexed | 0-indexed | Native format |
 | Pyright LSP | 0-indexed | 0-indexed | LSP specification |
 
-**Rationale:** Pyright CLI and LSP both use 0-indexed positions natively. Using 0-indexed throughout eliminates conversion errors and aligns with LSP specification.
+**Conversion boundary:** Tool implementations convert at the API boundary:
+- Input: `line_0 = line - 1`, `column_0 = column - 1`
+- Output: `line = line_0 + 1`, `column = column_0 + 1`
 
-**User-facing display:** When formatting diagnostics for human readability (e.g., in summary messages), convert to 1-indexed: `f"{line + 1}:{column + 1}"`.
+**Rationale:**
+- **API (1-indexed):** Matches what editors display to users. When Claude reports "error at line 42", users can directly navigate to line 42 in their editor without mental conversion.
+- **Internal (0-indexed):** Pyright CLI and LSP both use 0-indexed positions natively. Using 0-indexed internally eliminates conversion errors when interfacing with Pyright.
+
+**Implementation:** See `tools/hover.py:validate_hover_input()` and `tools/definition.py:validate_definition_input()` for conversion examples.
 
 ---
 
@@ -1564,138 +1570,166 @@ Or for development:
 
 **Status:** In progress
 
-### 14.2 Phase 2: LSP Integration
+### 14.2 Phase 2: LSP Integration for Hover and Definition
 
-**Scope:** Add hover and go-to-definition using Pyright LSP server
+**Scope:** Add `get_hover` and `go_to_definition` tools using Pyright LSP server
+
+**Key Architectural Decision:** LSP for IDE features only, CLI stays for type checking
+
+| Tool | Backend | Rationale |
+|------|---------|-----------|
+| `check_types` | CLI | Synchronous, predictable; `publishDiagnostics` is async notification |
+| `get_hover` | LSP | `textDocument/hover` is synchronous request/response |
+| `go_to_definition` | LSP | `textDocument/definition` is synchronous request/response |
+
+**Why NOT use LSP for check_types:** The `textDocument/publishDiagnostics` is a server→client *notification*, not a request. You cannot "request" diagnostics - they're published asynchronously after document changes.
 
 **Architecture Changes:**
 
-1. **LSP Backend for ALL Tools (Including check_types)**
-   - `check_types` uses `textDocument/publishDiagnostics` from LSP
-   - Hover uses `textDocument/hover`
-   - Go-to-definition uses `textDocument/definition`
-   - CLI becomes fallback only (when LSP not initialized)
+1. **Protocol Extension**
+   - Add `HoverBackend` and `DefinitionBackend` protocols to `base.py`
+   - Add `HoverResult` and `Location` data structures
+   - Keep existing `Backend` protocol for check operations
 
-2. **Document Manager**
-   - Track opened documents with `didOpen`/`didClose` lifecycle
-   - Send `didOpen` once per unique file
-   - Send `didClose` on idle timeout or workspace change
-   - Read file content from disk (Pyright watches for changes)
-
-3. **LSP Lifecycle Management**
-   - Lazy initialization: start LSP on first request
+2. **LSP Client Infrastructure**
+   - Raw JSON-RPC over stdin/stdout (no pygls dependency)
+   - Lifecycle states: `not_started` → `initializing` → `ready` → `shutdown`
+   - Lazy initialization on first hover/definition request
    - Idle timeout: shutdown after 5 minutes of inactivity
-   - Crash recovery: restart LSP on next request if crashed
-   - Workspace switching: reinitialize if project root changes
+   - Crash recovery: restart on next request
 
-4. **Backend Selection Strategy**
-   - Prefer LSP if already running (warm path, < 200ms)
-   - Fall back to CLI if LSP not initialized (avoid cold start delay)
-   - Use CLI for initial `check_types` in new workspace
-   - Subsequent operations use LSP (warm and fast)
+3. **Document Manager**
+   - Track opened documents with `didOpen`/`didClose` lifecycle
+   - Per-file locking for concurrency safety
+   - Async file reads to avoid blocking
+   - Clear tracking on LSP crash (no didClose sent)
+
+4. **Backend Selector Extension**
+   - Add `get_hover_backend()` and `get_definition_backend()` methods
+   - `HybridSelector`: CLI for check, LSP for hover/definition
+   - Workspace detection from `ProjectContext.root`
+
+5. **Error Code Standardization**
+   - Migrate from string error codes to `ErrorCode` enum
+   - Add LSP-specific codes: `lsp_error`, `lsp_not_ready`
 
 **New Files:**
 ```
 src/pyright_mcp/
 ├── backends/
 │   ├── lsp_client.py         # LSP subprocess manager
-│   ├── document_manager.py   # didOpen/didClose tracking
-│   └── backend_selector.py   # Choose CLI vs LSP
+│   └── document_manager.py   # didOpen/didClose tracking
 └── tools/
     ├── hover.py              # get_hover tool
     └── definition.py         # go_to_definition tool
 ```
 
+**Modified Files:**
+- `backends/base.py` - Add protocols and data structures
+- `backends/selector.py` - Add HybridSelector
+
 **LSP Communication:**
-- Use raw JSON-RPC over stdin/stdout (no pygls dependency)
+- Raw JSON-RPC over stdin/stdout
 - Initialize sequence: `initialize` → `initialized` → ready
-- Document sync: `didOpen` (with content) → watch files → `didClose`
-- Requests: `textDocument/hover`, `textDocument/definition`, `textDocument/publishDiagnostics`
+- Document sync: `didOpen` (with content) → Pyright file watcher → `didClose`
+- Requests: `textDocument/hover`, `textDocument/definition`
 
 **Testing Strategy:**
-- Mock LSP responses for unit tests
-- Record real LSP interactions for integration tests
+- Unit tests with mocked LSP responses
+- Integration tests with recorded pyright-langserver responses
 - Test LSP crash recovery and restart
-- Test workspace switching and reinitialization
+- Test document manager concurrency
+- Test workspace switching
 
 **Deliverables:**
-- `get_hover` tool
-- `go_to_definition` tool
+- `get_hover` tool via LSP
+- `go_to_definition` tool via LSP
 - LSP client with lifecycle management
-- Document manager
-- Backend selection logic
-- LSP integration tests
+- Document manager with concurrency handling
+- HybridSelector for operation-specific routing
+- ErrorCode enum standardization
+- LSP integration tests with recorded fixtures
 
-### 14.3 Phase 3: Polish and Optimization
+**NOT in Phase 2 scope:**
+- LSP for check_types (architectural mismatch)
+- Completions (Phase 3)
+- Result caching (Phase 3)
+- Multi-workspace LSP pooling (Phase 3)
 
-**Scope:** Completions, caching, performance, optional transports
+### 14.3 Phase 3: Completions, References, and Multi-Workspace Support
+
+**Scope:** Complete IDE feature set; production-ready multi-workspace support
+
+**Prerequisites:** Phase 2 complete (LSP client, document manager, hover, definition)
 
 **Features:**
 
 1. **get_completions Tool**
    - Use `textDocument/completion` LSP request
-   - Return completion items with type info and documentation
+   - Return completion items with kind, type signature, documentation
    - Support trigger characters (`.`, `(`, etc.)
+   - Map LSP completion kinds to readable strings
 
-2. **Result Caching**
-   - Cache diagnostics by file content hash
-   - Cache hover results by (file, position)
-   - Invalidate on file changes (use LSP file watching)
-   - LRU eviction policy
+2. **find_references Tool**
+   - Use `textDocument/references` LSP request
+   - Return all locations where symbol is used
+   - Option to include/exclude declaration
 
-3. **Rate Limiting**
-   - Per-tool rate limits (e.g., 10 requests/second)
-   - Prevent abuse from runaway clients
-   - Configurable via environment variables
+3. **Multi-Workspace LSP Pool**
+   - Pool of LSP clients, one per workspace root
+   - LRU eviction when at capacity (default: 3 instances)
+   - Per-workspace document managers
+   - Graceful shutdown of evicted clients
 
-4. **Alternative Transports**
-   - HTTP transport: RESTful API for diagnostics
-   - SSE transport: Server-sent events for streaming diagnostics
-   - Configured via `PYRIGHT_MCP_TRANSPORT` env var
-   - stdio remains default for Claude Code
+4. **Performance Metrics**
+   - Track per-operation latencies (count, avg, min, max)
+   - Error rate tracking
+   - Expose via health_check tool
+   - Context manager for easy integration
 
-5. **Performance Metrics**
-   - Track operation latencies (p50, p95, p99)
-   - Count cache hits/misses
-   - Log slow operations (> 1s)
-   - Export metrics via health_check tool
-
-6. **Multi-Project LSP Pooling**
-   - Run separate LSP instance per workspace root
-   - Pool management: limit max instances (e.g., 5)
-   - LRU eviction when pool full
-   - Share common dependencies across workspaces
+5. **get_signature Tool** (Optional)
+   - Use `textDocument/signatureHelp` LSP request
+   - Display function signatures during argument entry
+   - Track active parameter position
 
 **New Files:**
 ```
 src/pyright_mcp/
-├── cache/
-│   ├── result_cache.py       # Content-hash based caching
-│   └── file_watcher.py       # LSP file event integration
-├── rate_limit/
-│   └── limiter.py            # Per-tool rate limiting
-├── transports/
-│   ├── http_server.py        # HTTP transport
-│   └── sse_server.py         # SSE transport
+├── backends/
+│   └── lsp_pool.py           # Multi-workspace LSP pooling
+├── metrics.py                # Performance tracking
 └── tools/
-    └── completions.py        # get_completions tool
+    ├── completions.py        # get_completions tool
+    ├── references.py         # find_references tool
+    └── signature.py          # get_signature tool (optional)
 ```
+
+**Modified Files:**
+- `backends/base.py` - Add CompletionResult, CompletionItem, CompletionBackend, ReferencesBackend
+- `backends/lsp_client.py` - Add complete(), references(), signature() methods
+- `backends/selector.py` - Add PooledSelector
+- `tools/health_check.py` - Add metrics and pool status
 
 **Environment Variables:**
 ```bash
-PYRIGHT_MCP_TRANSPORT=stdio|http|sse  # Transport mode
-PYRIGHT_MCP_CACHE_ENABLED=true        # Enable result caching
-PYRIGHT_MCP_RATE_LIMIT=10             # Requests per second
-PYRIGHT_MCP_LSP_POOL_SIZE=5           # Max LSP instances
+PYRIGHT_MCP_LSP_POOL_SIZE=3       # Max LSP instances (default: 3)
+PYRIGHT_MCP_METRICS_ENABLED=true  # Enable metrics collection (default: true)
 ```
 
 **Deliverables:**
-- `get_completions` tool
-- Result caching with file watching
-- Rate limiting infrastructure
-- HTTP and SSE transports
-- Performance metrics
-- Multi-project LSP pooling
+- `get_completions` tool via LSP
+- `find_references` tool via LSP
+- Multi-workspace LSP pooling with LRU eviction
+- Performance metrics with health_check integration
+- `get_signature` tool (optional)
+- PooledSelector for production deployments
+
+**NOT in Phase 3 scope (potential future work):**
+- Result caching (LSP handles this internally)
+- Rate limiting (single-client MCP doesn't need it)
+- HTTP/SSE transports (stdio sufficient for Claude Code)
+- Rename refactoring (complex, requires file writes)
+- Code actions/quick fixes (complex, requires file writes)
 
 ---
 
@@ -1707,3 +1741,5 @@ PYRIGHT_MCP_LSP_POOL_SIZE=5           # Max LSP instances
 | 0.2 | 2026-01-21 | Claude Code | Added Section 3 (Position Indexing), Section 4 (Utilities), Section 8.2 (Logging Strategy), renumbered sections |
 | 0.3 | 2026-01-21 | Claude Code | Added Section 5.3 (Backend Interface Protocol with BackendError), Section 5.6 (Document Lifecycle Management), updated Diagnostic to Range-based design, discriminated union response format, explicit logging initialization pattern, context/ module reorganization, mcp dependency update |
 | 0.4 | 2026-01-21 | Claude Code | Added Section 4.4 (Input Validation), Section 5.1.1 (Configuration Module), Section 5.9 (Health Check Tool), Section 6.3 (Cancellation Support). Updated Section 5.2 (async project detection), Section 5.3 (ErrorCode enum), Section 8.1 (new env vars: ALLOWED_PATHS, ENABLE_HEALTH_CHECK, TRANSPORT). Expanded Section 14 with detailed Phase 2 (LSP for all tools, document manager, backend selection) and Phase 3 (completions, caching, rate limiting, transports, metrics, LSP pooling) implementation plans. |
+| 0.5 | 2026-01-22 | Claude Code | **Phase 2 revision:** Removed LSP for check_types (publishDiagnostics is async notification, not request). Phase 2 now focused on hover and definition only. Added protocol extension (HoverBackend, DefinitionBackend), document manager concurrency handling, HybridSelector. **Phase 3 revision:** Replaced caching/rate-limiting/transports with completions, references, multi-workspace LSP pooling, and performance metrics. Added PooledSelector and optional signature help. |
+| 0.6 | 2026-01-22 | Claude Code | **Section 3 update:** Changed MCP Tool API from 0-indexed to 1-indexed positions. Rationale: 1-indexed matches editor display, improving UX when users navigate to reported locations. Internal data structures remain 0-indexed for Pyright compatibility. Added conversion boundary documentation. |

@@ -70,18 +70,24 @@ This document describes the technical design for pyright-mcp, an MCP server that
 
 ## 3. Position Indexing Convention
 
-**All positions in pyright-mcp use 0-indexed line and column numbers.**
+**MCP Tool API uses 1-indexed positions. Internal data structures use 0-indexed.**
 
 | Component | Line | Column | Notes |
 |-----------|------|--------|-------|
-| MCP Tool API | 0-indexed | 0-indexed | External interface |
+| MCP Tool API | 1-indexed | 1-indexed | External interface (user-friendly) |
 | Internal data structures | 0-indexed | 0-indexed | Diagnostic, Location, Range |
 | Pyright CLI JSON | 0-indexed | 0-indexed | Native format |
 | Pyright LSP | 0-indexed | 0-indexed | LSP specification |
 
-**Rationale:** Pyright CLI and LSP both use 0-indexed positions natively. Using 0-indexed throughout eliminates conversion errors and aligns with LSP specification.
+**Conversion boundary:** Tool implementations convert at the API boundary:
+- Input: `line_0 = line - 1`, `column_0 = column - 1`
+- Output: `line = line_0 + 1`, `column = column_0 + 1`
 
-**User-facing display:** When formatting diagnostics for human readability (e.g., in summary messages), convert to 1-indexed: `f"{line + 1}:{column + 1}"`.
+**Rationale:**
+- **API (1-indexed):** Matches what editors display to users. When Claude reports "error at line 42", users can directly navigate to line 42 in their editor without mental conversion.
+- **Internal (0-indexed):** Pyright CLI and LSP both use 0-indexed positions natively. Using 0-indexed internally eliminates conversion errors when interfacing with Pyright.
+
+**Implementation:** See `tools/hover.py:validate_hover_input()` and `tools/definition.py:validate_definition_input()` for conversion examples.
 
 ---
 
@@ -1736,3 +1742,4 @@ PYRIGHT_MCP_METRICS_ENABLED=true  # Enable metrics collection (default: true)
 | 0.3 | 2026-01-21 | Claude Code | Added Section 5.3 (Backend Interface Protocol with BackendError), Section 5.6 (Document Lifecycle Management), updated Diagnostic to Range-based design, discriminated union response format, explicit logging initialization pattern, context/ module reorganization, mcp dependency update |
 | 0.4 | 2026-01-21 | Claude Code | Added Section 4.4 (Input Validation), Section 5.1.1 (Configuration Module), Section 5.9 (Health Check Tool), Section 6.3 (Cancellation Support). Updated Section 5.2 (async project detection), Section 5.3 (ErrorCode enum), Section 8.1 (new env vars: ALLOWED_PATHS, ENABLE_HEALTH_CHECK, TRANSPORT). Expanded Section 14 with detailed Phase 2 (LSP for all tools, document manager, backend selection) and Phase 3 (completions, caching, rate limiting, transports, metrics, LSP pooling) implementation plans. |
 | 0.5 | 2026-01-22 | Claude Code | **Phase 2 revision:** Removed LSP for check_types (publishDiagnostics is async notification, not request). Phase 2 now focused on hover and definition only. Added protocol extension (HoverBackend, DefinitionBackend), document manager concurrency handling, HybridSelector. **Phase 3 revision:** Replaced caching/rate-limiting/transports with completions, references, multi-workspace LSP pooling, and performance metrics. Added PooledSelector and optional signature help. |
+| 0.6 | 2026-01-22 | Claude Code | **Section 3 update:** Changed MCP Tool API from 0-indexed to 1-indexed positions. Rationale: 1-indexed matches editor display, improving UX when users navigate to reported locations. Internal data structures remain 0-indexed for Pyright compatibility. Added conversion boundary documentation. |

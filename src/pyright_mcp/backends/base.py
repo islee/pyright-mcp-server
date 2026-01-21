@@ -134,7 +134,7 @@ class Backend(Protocol):
 
 
 # ============================================================================
-# Phase 2: LSP-specific data structures and protocols
+# Phase 2/3: LSP-specific data structures and protocols
 # ============================================================================
 
 
@@ -215,6 +215,56 @@ class DefinitionResult:
         }
 
 
+@dataclass
+class CompletionItem:
+    """A single completion suggestion.
+
+    Attributes:
+        label: Display text for the completion
+        kind: Type of completion (function, variable, class, etc.)
+        detail: Additional details (e.g., type signature)
+        documentation: Documentation string
+        insert_text: Text to insert (may differ from label)
+    """
+
+    label: str
+    kind: str  # "function", "variable", "class", "method", "property", "module", "keyword"
+    detail: str | None = None
+    documentation: str | None = None
+    insert_text: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for MCP response."""
+        return {
+            "label": self.label,
+            "kind": self.kind,
+            "detail": self.detail,
+            "documentation": self.documentation,
+            "insert_text": self.insert_text or self.label,
+        }
+
+
+@dataclass
+class CompletionResult:
+    """Result from completion operation.
+
+    Attributes:
+        items: List of completion suggestions
+        is_incomplete: Whether more items may be available
+    """
+
+    items: list[CompletionItem]
+    is_incomplete: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for MCP response."""
+        return {
+            "status": "success",
+            "items": [item.to_dict() for item in self.items],
+            "is_incomplete": self.is_incomplete,
+        }
+
+
 class HoverBackend(Protocol):
     """Protocol for backends that support hover information."""
 
@@ -266,6 +316,37 @@ class DefinitionBackend(Protocol):
 
         Returns:
             DefinitionResult with list of definition locations
+
+        Raises:
+            BackendError: If operation fails
+        """
+        ...
+
+
+class CompletionBackend(Protocol):
+    """Protocol for backends that support code completion."""
+
+    async def complete(
+        self,
+        file: Path,
+        line: int,
+        column: int,
+        *,
+        project_root: Path | None = None,
+        trigger_character: str | None = None,
+    ) -> CompletionResult:
+        """
+        Get completion suggestions at a position.
+
+        Args:
+            file: Path to the file
+            line: 0-indexed line number
+            column: 0-indexed column number
+            project_root: Optional project root for configuration
+            trigger_character: Character that triggered completion (e.g., ".")
+
+        Returns:
+            CompletionResult with completion suggestions
 
         Raises:
             BackendError: If operation fails

@@ -4,7 +4,6 @@ This module provides the get_hover MCP tool, which returns type information
 and documentation for a symbol at a given position using the Pyright LSP.
 """
 
-from pathlib import Path
 from typing import Any
 
 from ..backends.base import BackendError
@@ -12,55 +11,9 @@ from ..backends.selector import get_selector
 from ..config import get_config
 from ..context.project import detect_project
 from ..logging_config import get_logger
-from ..validation import ValidationError, validate_path
+from ..validation import ValidationError, validate_path, validate_position_input
 
 logger = get_logger("tools.hover")
-
-
-def validate_hover_input(
-    file: str | None,
-    line: int | None,
-    column: int | None,
-) -> tuple[Path, int, int]:
-    """Validate input parameters for get_hover tool.
-
-    Args:
-        file: File path (must be absolute)
-        line: 1-indexed line number
-        column: 1-indexed column number
-
-    Returns:
-        Tuple of (validated_path, 0-indexed line, 0-indexed column)
-
-    Raises:
-        ValidationError: If any input is invalid
-    """
-    # Validate file path
-    if file is None:
-        raise ValidationError("file", "file parameter is required")
-    if not file.strip():
-        raise ValidationError("file", "file parameter cannot be empty")
-
-    # Validate line
-    if line is None:
-        raise ValidationError("line", "line parameter is required")
-    if line < 1:
-        raise ValidationError("line", f"line must be >= 1, got {line}")
-
-    # Validate column
-    if column is None:
-        raise ValidationError("column", "column parameter is required")
-    if column < 1:
-        raise ValidationError("column", f"column must be >= 1, got {column}")
-
-    # Validate path exists and normalize
-    validated_path = validate_path(file)
-
-    # Convert 1-indexed to 0-indexed
-    line_0 = line - 1
-    column_0 = column - 1
-
-    return validated_path, line_0, column_0
 
 
 async def get_hover(
@@ -114,7 +67,7 @@ async def get_hover(
 
     # Step 1: Validate input (convert 1-indexed to 0-indexed)
     try:
-        validated_path, line_0, column_0 = validate_hover_input(file, line, column)
+        validated_path, line_0, column_0 = validate_position_input(file, line, column)
     except ValidationError as e:
         logger.warning(f"Input validation failed: {e}")
         return e.to_error_response()

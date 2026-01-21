@@ -6,83 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pyright_mcp.backends.base import BackendError, DefinitionResult, Location
-from pyright_mcp.tools.definition import go_to_definition, validate_definition_input
+from pyright_mcp.tools.definition import go_to_definition
 from pyright_mcp.utils.position import Position
 from pyright_mcp.validation import ValidationError
 
-
-class TestValidateDefinitionInput:
-    """Tests for validate_definition_input function."""
-
-    def test_validate_definition_input_success(self, tmp_path: Path):
-        """Test successful validation with valid inputs."""
-        file_path = tmp_path / "test.py"
-        file_path.write_text("x: int = 1")
-
-        validated_path, line, column = validate_definition_input(
-            str(file_path), line=10, column=5
-        )
-
-        assert validated_path == file_path.resolve()
-        # Converted from 1-indexed to 0-indexed
-        assert line == 9
-        assert column == 4
-
-    def test_validate_definition_input_none_file(self):
-        """Test validation fails for None file."""
-        with pytest.raises(ValidationError) as exc_info:
-            validate_definition_input(None, line=1, column=1)
-        assert exc_info.value.field == "file"
-
-    def test_validate_definition_input_empty_file(self):
-        """Test validation fails for empty file string."""
-        with pytest.raises(ValidationError) as exc_info:
-            validate_definition_input("", line=1, column=1)
-        assert exc_info.value.field == "file"
-
-    def test_validate_definition_input_none_line(self, tmp_path: Path):
-        """Test validation fails for None line."""
-        file_path = tmp_path / "test.py"
-        file_path.write_text("x: int = 1")
-
-        with pytest.raises(ValidationError) as exc_info:
-            validate_definition_input(str(file_path), line=None, column=1)
-        assert exc_info.value.field == "line"
-
-    def test_validate_definition_input_zero_line(self, tmp_path: Path):
-        """Test validation fails for line < 1."""
-        file_path = tmp_path / "test.py"
-        file_path.write_text("x: int = 1")
-
-        with pytest.raises(ValidationError) as exc_info:
-            validate_definition_input(str(file_path), line=0, column=1)
-        assert exc_info.value.field == "line"
-
-    def test_validate_definition_input_none_column(self, tmp_path: Path):
-        """Test validation fails for None column."""
-        file_path = tmp_path / "test.py"
-        file_path.write_text("x: int = 1")
-
-        with pytest.raises(ValidationError) as exc_info:
-            validate_definition_input(str(file_path), line=1, column=None)
-        assert exc_info.value.field == "column"
-
-    def test_validate_definition_input_zero_column(self, tmp_path: Path):
-        """Test validation fails for column < 1."""
-        file_path = tmp_path / "test.py"
-        file_path.write_text("x: int = 1")
-
-        with pytest.raises(ValidationError) as exc_info:
-            validate_definition_input(str(file_path), line=1, column=0)
-        assert exc_info.value.field == "column"
-
-    def test_validate_definition_input_nonexistent_file(self, tmp_path: Path):
-        """Test validation fails for nonexistent file."""
-        nonexistent = tmp_path / "nonexistent.py"
-
-        with pytest.raises(ValidationError) as exc_info:
-            validate_definition_input(str(nonexistent), line=1, column=1)
-        assert "does not exist" in exc_info.value.message
+# Note: validate_position_input tests are in test_hover.py since the function
+# is now shared. These tests focus on go_to_definition behavior.
 
 
 class TestGoToDefinition:

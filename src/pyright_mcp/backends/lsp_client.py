@@ -1,13 +1,16 @@
 """LSP client for Pyright language server.
 
 Manages the pyright-langserver subprocess with JSON-RPC over stdin/stdout.
-Provides hover and go-to-definition functionality via LSP protocol.
+Provides hover, go-to-definition, and completion functionality via LSP protocol.
 
 Key features:
 - Lazy initialization on first request
-- Idle timeout (configurable, default 5 minutes)
+- Idle timeout (configurable via PYRIGHT_MCP_LSP_TIMEOUT, default 5 minutes)
+- Activity tracking on all requests (hover, definition, complete)
 - Automatic crash recovery (restart on next request)
 - Document lifecycle management via DocumentManager
+
+Note: check_idle_timeout() must be called periodically for timeout enforcement.
 """
 
 from __future__ import annotations
@@ -26,7 +29,14 @@ from ..config import Config, get_config
 from ..logging_config import get_logger
 from ..utils.position import Position, Range
 from ..utils.uri import path_to_uri, uri_to_path
-from .base import BackendError, DefinitionResult, HoverResult, Location
+from .base import (
+    BackendError,
+    CompletionItem,
+    CompletionResult,
+    DefinitionResult,
+    HoverResult,
+    Location,
+)
 from .document_manager import DocumentManager
 
 logger = get_logger("backends.lsp_client")
@@ -254,6 +264,10 @@ class LSPClient:
                     recoverable=True,
                 )
 
+            # Update activity timestamp for idle timeout tracking
+            if self._process:
+                self._process.last_activity = time.time()
+
             try:
                 # Ensure document is open
                 await self._documents.ensure_open(self, file)
@@ -317,6 +331,10 @@ class LSPClient:
                     recoverable=True,
                 )
 
+            # Update activity timestamp for idle timeout tracking
+            if self._process:
+                self._process.last_activity = time.time()
+
             try:
                 # Ensure document is open
                 await self._documents.ensure_open(self, file)
@@ -341,6 +359,86 @@ class LSPClient:
                 raise BackendError(
                     error_code="lsp_crash",
                     message=f"Definition request failed: {e}",
+                    recoverable=True,
+                ) from e
+
+    async def complete(
+        self,
+        file: Path,
+        line: int,
+        column: int,
+        *,
+        project_root: Path | None = None,
+        trigger_character: str | None = None,
+    ) -> CompletionResult:
+        """Get completion suggestions at a position.
+
+        Args:
+            file: Path to the file
+            line: 0-indexed line number
+            column: 0-indexed column number
+            project_root: Optional project root (uses file's parent if not specified)
+            trigger_character: Character that triggered completion (e.g., ".")
+
+        Returns:
+            CompletionResult with completion suggestions
+
+        Raises:
+            BackendError: If operation fails
+        """
+        # Determine workspace root
+        workspace = project_root or file.parent
+
+        # Ensure LSP is ready
+        await self.ensure_initialized(workspace)
+
+        async with self._lock:
+            if self._state != LSPState.READY:
+                raise BackendError(
+                    error_code="lsp_not_ready",
+                    message="LSP server is not ready",
+                    recoverable=True,
+                )
+
+            # Update activity timestamp for idle timeout tracking
+            if self._process:
+                self._process.last_activity = time.time()
+
+            try:
+                # Ensure document is open
+                await self._documents.ensure_open(self, file)
+
+                # Send completion request
+                uri = path_to_uri(file)
+                params: dict[str, Any] = {
+                    "textDocument": {"uri": uri},
+                    "position": {"line": line, "character": column},
+                }
+
+                # Add completion context
+                if trigger_character:
+                    params["context"] = {
+                        "triggerKind": 2,  # TriggerCharacter
+                        "triggerCharacter": trigger_character,
+                    }
+                else:
+                    params["context"] = {
+                        "triggerKind": 1,  # Invoked
+                    }
+
+                result = await self._send_request("textDocument/completion", params)
+
+                # Parse response
+                return self._parse_completion_response(result)
+
+            except BackendError:
+                raise
+            except Exception as e:
+                logger.error(f"Completion request failed: {e}", exc_info=True)
+                await self._handle_error(e)
+                raise BackendError(
+                    error_code="lsp_crash",
+                    message=f"Completion request failed: {e}",
                     recoverable=True,
                 ) from e
 
@@ -721,11 +819,131 @@ class LSPClient:
             logger.warning(f"Failed to parse location: {e}")
             return None
 
+    def _parse_completion_response(
+        self, result: dict[str, Any] | list[dict[str, Any]] | None
+    ) -> CompletionResult:
+        """Parse LSP completion response into CompletionResult.
+
+        Args:
+            result: LSP completion response (CompletionList or CompletionItem[])
+
+        Returns:
+            CompletionResult with parsed items
+        """
+        if result is None:
+            return CompletionResult(items=[], is_incomplete=False)
+
+        # Handle CompletionList vs array of CompletionItem
+        if isinstance(result, dict) and "items" in result:
+            items_data = result.get("items", [])
+            is_incomplete = result.get("isIncomplete", False)
+        elif isinstance(result, list):
+            items_data = result
+            is_incomplete = False
+        else:
+            return CompletionResult(items=[], is_incomplete=False)
+
+        items: list[CompletionItem] = []
+        for item_data in items_data:
+            item = self._parse_completion_item(item_data)
+            if item:
+                items.append(item)
+
+        return CompletionResult(items=items, is_incomplete=is_incomplete)
+
+    def _parse_completion_item(self, item: dict[str, Any]) -> CompletionItem | None:
+        """Parse a single LSP CompletionItem.
+
+        Args:
+            item: LSP CompletionItem dict
+
+        Returns:
+            CompletionItem or None if parsing fails
+        """
+        try:
+            label = item.get("label", "")
+            if not label:
+                return None
+
+            # Map LSP CompletionItemKind to string
+            kind_map = {
+                1: "text",
+                2: "method",
+                3: "function",
+                4: "constructor",
+                5: "field",
+                6: "variable",
+                7: "class",
+                8: "interface",
+                9: "module",
+                10: "property",
+                11: "unit",
+                12: "value",
+                13: "enum",
+                14: "keyword",
+                15: "snippet",
+                16: "color",
+                17: "file",
+                18: "reference",
+                19: "folder",
+                20: "enum_member",
+                21: "constant",
+                22: "struct",
+                23: "event",
+                24: "operator",
+                25: "type_parameter",
+            }
+            kind_num = item.get("kind", 1)
+            kind = kind_map.get(kind_num, "text")
+
+            # Extract detail and documentation
+            detail = item.get("detail")
+            doc = item.get("documentation")
+            if isinstance(doc, dict):
+                doc = doc.get("value", "")
+
+            # Extract insert text
+            insert_text = item.get("insertText")
+            if not insert_text:
+                text_edit = item.get("textEdit")
+                if isinstance(text_edit, dict):
+                    insert_text = text_edit.get("newText")
+
+            return CompletionItem(
+                label=label,
+                kind=kind,
+                detail=detail,
+                documentation=doc,
+                insert_text=insert_text,
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to parse completion item: {e}")
+            return None
+
     async def check_idle_timeout(self) -> bool:
         """Check if LSP should be shut down due to idle timeout.
 
+        This method must be called periodically to enforce idle timeout.
+        Current implementation expects manual invocation, e.g.:
+
+        - Per-request check: Call after each request completes
+        - Background task: asyncio.create_task() checking periodically
+        - Tool wrapper: Check before/after tool execution
+
+        Phase 3 Note: Consider adaptive timeout strategies:
+        - Shorter timeout after period of high activity (e.g., 1 min after completions)
+        - Longer timeout during low activity (current 5 min default)
+        - Or keep simple: single configurable timeout via PYRIGHT_MCP_LSP_TIMEOUT
+
+        Activity is tracked via _process.last_activity, updated on:
+        - ensure_initialized() - LSP startup
+        - hover() - hover requests
+        - definition() - go-to-definition requests
+        - complete() - completion requests
+
         Returns:
-            True if LSP was shut down, False otherwise
+            True if LSP was shut down due to timeout, False otherwise
         """
         async with self._lock:
             if self._state != LSPState.READY or not self._process:

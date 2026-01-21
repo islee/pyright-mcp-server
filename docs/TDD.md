@@ -570,51 +570,37 @@ class PyrightBackend(Protocol):
         ...
 
 
-class ErrorCode(Enum):
-    """Standard error codes for backend operations."""
-    NOT_FOUND = "not_found"              # File/executable not found
-    TIMEOUT = "timeout"                  # Operation timed out
-    PARSE_ERROR = "parse_error"          # Failed to parse output
-    LSP_CRASH = "lsp_crash"              # LSP server crashed
-    VALIDATION_ERROR = "validation_error"  # Input validation failed
-    PATH_NOT_ALLOWED = "path_not_allowed"  # Path outside workspace
-    CANCELLED = "cancelled"              # Operation cancelled
+class BackendError(Exception):
+    """Exception for backend operation errors.
 
+    Design rationale: Using exceptions instead of dataclasses for error handling
+    in Python async code. This approach integrates naturally with try/except blocks
+    and exception chaining, making error propagation clearer than result types.
+    """
 
-@dataclass
-class BackendError:
-    """Unified error type for all backends (CLI and LSP)."""
-    code: ErrorCode  # Standard error code
-    message: str     # Human-readable error message
-    recoverable: bool = False  # Can operation be retried?
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        recoverable: bool = False,
+        details: dict[str, Any] | None = None,
+    ):
+        """
+        Initialize backend error.
 
-    @classmethod
-    def not_found(cls, message: str) -> "BackendError":
-        return cls(code=ErrorCode.NOT_FOUND, message=message, recoverable=False)
-
-    @classmethod
-    def timeout(cls, message: str) -> "BackendError":
-        return cls(code=ErrorCode.TIMEOUT, message=message, recoverable=True)
-
-    @classmethod
-    def parse_error(cls, message: str) -> "BackendError":
-        return cls(code=ErrorCode.PARSE_ERROR, message=message, recoverable=False)
-
-    @classmethod
-    def lsp_crash(cls, message: str) -> "BackendError":
-        return cls(code=ErrorCode.LSP_CRASH, message=message, recoverable=True)
-
-    @classmethod
-    def validation_error(cls, message: str) -> "BackendError":
-        return cls(code=ErrorCode.VALIDATION_ERROR, message=message, recoverable=False)
-
-    @classmethod
-    def path_not_allowed(cls, message: str) -> "BackendError":
-        return cls(code=ErrorCode.PATH_NOT_ALLOWED, message=message, recoverable=False)
-
-    @classmethod
-    def cancelled(cls, message: str) -> "BackendError":
-        return cls(code=ErrorCode.CANCELLED, message=message, recoverable=True)
+        Args:
+            error_code: One of: not_found, timeout, parse_error, invalid_path,
+                        execution_error, lsp_crash, validation_error,
+                        path_not_allowed, cancelled
+            message: Human-readable error description
+            recoverable: Whether the operation can be retried
+            details: Optional additional context
+        """
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.recoverable = recoverable
+        self.details = details or {}
 ```
 
 ### 5.4 Pyright CLI Runner (Phase 1)

@@ -2,17 +2,30 @@
 
 An MCP (Model Context Protocol) server that exposes Pyright's Python static type checking capabilities to LLM clients like Claude.
 
+> **Status:** Phase 1 Complete - CLI-first MVP with `check_types` and `health_check` tools. See [STATUS.md](STATUS.md) for details.
+
 ## Features
 
-| Tool | Description | Phase |
-|------|-------------|-------|
-| `check_types` | Run type checking on file/directory | 1 |
-| `get_hover` | Get type info and docstring at position | 2 |
-| `go_to_definition` | Find definition location for symbol | 2 |
-| `get_completions` | Get completion suggestions at position | 3 |
+| Tool | Description | Phase | Status |
+|------|-------------|-------|--------|
+| `check_types` | Run type checking on file/directory | 1 (MVP) | ✓ Implemented |
+| `health_check` | Check server health and Pyright availability | 1 (MVP) | ✓ Implemented |
+| `get_hover` | Get type info and docstring at position | 2 (LSP) | Planned |
+| `go_to_definition` | Find definition location for symbol | 2 (LSP) | Planned |
+| `get_completions` | Get completion suggestions at position | 3 (Polish) | Planned |
 
 ## Installation
 
+### From Source (Recommended for Development)
+
+```bash
+git clone https://github.com/islee/pyright-mcp-server.git
+cd pyright-mcp-server
+uv sync
+uv run python -m pyright_mcp
+```
+
+### From PyPI (When Published)
 ```bash
 # Via uv (recommended)
 uv add pyright-mcp
@@ -67,6 +80,22 @@ get_hover("/path/to/file.py", line=10, column=5)
 go_to_definition("/path/to/file.py", line=10, column=5)
 ```
 
+## Requirements
+
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- Node.js (for Pyright, installed automatically via pyright package)
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PYRIGHT_MCP_ALLOWED_PATHS` | (none) | Colon-separated allowed paths. If not set, all paths allowed. |
+| `PYRIGHT_MCP_CLI_TIMEOUT` | `30` | CLI execution timeout (seconds) |
+| `PYRIGHT_MCP_LOG_MODE` | `stderr` | Logging: `stderr`, `file`, or `both` |
+| `PYRIGHT_MCP_LOG_LEVEL` | `INFO` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `PYRIGHT_MCP_ENABLE_HEALTH_CHECK` | `true` | Enable health_check tool |
+
 ## Development
 
 ```bash
@@ -82,8 +111,9 @@ uv run pytest
 # Type check
 uv run pyright
 
-# Lint
+# Lint and format
 uv run ruff check .
+uv run ruff format .
 ```
 
 ## Architecture
@@ -115,6 +145,7 @@ uv run ruff check .
 
 - [Product Requirements (PRD)](docs/PRD.md)
 - [Technical Design (TDD)](docs/TDD.md)
+- [Implementation Plan](docs/IMPLEMENTATION.md)
 
 ## License
 

@@ -241,6 +241,163 @@ def build_pyright_command(
     return cmd
 ```
 
+### 4.4 Input Validation
+
+**File:** `src/pyright_mcp/validation/paths.py`
+
+```python
+"""Path validation and workspace restriction."""
+
+from pathlib import Path
+from typing import Sequence
+
+from ..config import get_config
+from ..logging_config import get_logger
+
+logger = get_logger('validation.paths')
+
+
+class PathValidationError(Exception):
+    """Raised when a path fails validation."""
+    pass
+
+
+def validate_path(path: Path) -> None:
+    """
+    Validate a path for security and correctness.
+
+    Args:
+        path: Path to validate (should be absolute)
+
+    Raises:
+        PathValidationError: If path is invalid or not allowed
+    """
+    # Ensure path is absolute
+    if not path.is_absolute():
+        raise PathValidationError(f"Path must be absolute: {path}")
+
+    # Check workspace restriction
+    if not is_path_allowed(path):
+        config = get_config()
+        allowed = config.allowed_paths or ["(all paths allowed)"]
+        raise PathValidationError(
+            f"Path not in allowed workspace: {path}\n"
+            f"Allowed paths: {', '.join(str(p) for p in allowed)}"
+        )
+
+
+def is_path_allowed(path: Path) -> bool:
+    """
+    Check if path is within allowed workspace.
+
+    Uses PYRIGHT_MCP_ALLOWED_PATHS environment variable.
+    If not set, all paths are allowed (trusted client mode).
+
+    Args:
+        path: Path to check
+
+    Returns:
+        True if path is allowed, False otherwise
+    """
+    config = get_config()
+
+    # If no restriction set, allow all paths
+    if config.allowed_paths is None:
+        return True
+
+    # Check if path is within any allowed root
+    path = path.resolve()
+    for allowed_root in config.allowed_paths:
+        try:
+            path.relative_to(allowed_root)
+            return True
+        except ValueError:
+            continue
+
+    return False
+```
+
+**File:** `src/pyright_mcp/validation/inputs.py`
+
+```python
+"""Input validation for MCP tool parameters."""
+
+from pathlib import Path
+from typing import Tuple
+
+
+class InputValidationError(Exception):
+    """Raised when input parameters are invalid."""
+    pass
+
+
+def validate_position(line: int, column: int) -> Tuple[int, int]:
+    """
+    Validate line and column position.
+
+    Args:
+        line: 0-indexed line number
+        column: 0-indexed column number
+
+    Returns:
+        Tuple of (line, column) if valid
+
+    Raises:
+        InputValidationError: If position is invalid
+    """
+    if line < 0:
+        raise InputValidationError(f"Line must be >= 0, got: {line}")
+    if column < 0:
+        raise InputValidationError(f"Column must be >= 0, got: {column}")
+
+    return (line, column)
+
+
+def validate_python_version(version: str | None) -> str | None:
+    """
+    Validate Python version string.
+
+    Args:
+        version: Python version (e.g., "3.11") or None
+
+    Returns:
+        Version string if valid, None if input was None
+
+    Raises:
+        InputValidationError: If version format is invalid
+    """
+    if version is None:
+        return None
+
+    # Expected format: "3.10", "3.11", etc.
+    import re
+    if not re.match(r"^\d+\.\d+$", version):
+        raise InputValidationError(
+            f"Invalid Python version format: {version}. "
+            f"Expected format: '3.10', '3.11', etc."
+        )
+
+    return version
+```
+
+**File:** `src/pyright_mcp/validation/__init__.py`
+
+```python
+"""Input validation utilities."""
+
+from .paths import validate_path, is_path_allowed, PathValidationError
+from .inputs import validate_position, validate_python_version, InputValidationError
+
+__all__ = [
+    "validate_path",
+    "is_path_allowed",
+    "PathValidationError",
+    "validate_position",
+    "validate_python_version",
+    "InputValidationError",
+]
+```
+
 ---
 
 ## 5. Component Design
@@ -266,9 +423,87 @@ async def check_types(path: str, python_version: str | None = None) -> dict:
     ...
 ```
 
+### 5.1.1 Configuration Module
+
+**File:** `src/pyright_mcp/config.py`
+
+```python
+"""Runtime configuration management."""
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class Config:
+    """Runtime configuration for pyright-mcp."""
+    allowed_paths: list[Path] | None  # Workspace restriction (None = allow all)
+    cli_timeout: float                # CLI execution timeout (seconds)
+    lsp_timeout: float                # LSP idle timeout (seconds)
+    lsp_command: list[str]            # LSP server command
+    log_mode: str                     # Logging mode: stderr, file, both
+    log_level: str                    # Logging level: DEBUG, INFO, WARNING, ERROR
+    enable_health_check: bool         # Enable health_check tool
+
+
+_config: Config | None = None
+
+
+def load_config() -> Config:
+    """
+    Load configuration from environment variables.
+
+    Environment Variables:
+        PYRIGHT_MCP_ALLOWED_PATHS: Colon-separated list of allowed paths (default: None)
+        PYRIGHT_MCP_CLI_TIMEOUT: CLI timeout in seconds (default: 30)
+        PYRIGHT_MCP_LSP_TIMEOUT: LSP idle timeout in seconds (default: 300)
+        PYRIGHT_MCP_LSP_COMMAND: LSP server command (default: pyright-langserver)
+        PYRIGHT_MCP_LOG_MODE: Logging mode (default: stderr)
+        PYRIGHT_MCP_LOG_LEVEL: Logging level (default: INFO)
+        PYRIGHT_MCP_ENABLE_HEALTH_CHECK: Enable health_check tool (default: true)
+
+    Returns:
+        Config instance
+    """
+    # Parse allowed paths
+    allowed_paths = None
+    if allowed_paths_str := os.getenv("PYRIGHT_MCP_ALLOWED_PATHS"):
+        allowed_paths = [Path(p).resolve() for p in allowed_paths_str.split(":")]
+
+    # Parse LSP command
+    lsp_command_str = os.getenv("PYRIGHT_MCP_LSP_COMMAND", "pyright-langserver")
+    lsp_command = lsp_command_str.split() if lsp_command_str else ["pyright-langserver", "--stdio"]
+
+    return Config(
+        allowed_paths=allowed_paths,
+        cli_timeout=float(os.getenv("PYRIGHT_MCP_CLI_TIMEOUT", "30")),
+        lsp_timeout=float(os.getenv("PYRIGHT_MCP_LSP_TIMEOUT", "300")),
+        lsp_command=lsp_command,
+        log_mode=os.getenv("PYRIGHT_MCP_LOG_MODE", "stderr"),
+        log_level=os.getenv("PYRIGHT_MCP_LOG_LEVEL", "INFO"),
+        enable_health_check=os.getenv("PYRIGHT_MCP_ENABLE_HEALTH_CHECK", "true").lower() == "true",
+    )
+
+
+def get_config() -> Config:
+    """
+    Get singleton config instance.
+
+    Returns:
+        Config instance (loads on first call)
+    """
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
+```
+
 ### 5.2 Project Detection Module
 
-**File:** `src/pyright_mcp/project_detection.py`
+**File:** `src/pyright_mcp/context/project.py`
+
+**Note:** Project detection is organized in the `context/` module to group related functionality (project root, venv, config parsing) and prepare for Phase 2 workspace management.
 
 **Data Structures:**
 ```python
@@ -284,18 +519,22 @@ class ProjectContext:
 
 **Functions:**
 ```python
-def detect_project(target_path: Path) -> ProjectContext:
+async def detect_project(target_path: Path) -> ProjectContext:
     """
-    Detect project context from a target file or directory.
+    Detect project context from a target file or directory (async).
 
     Detection order:
     1. Walk up from target_path looking for config files
     2. Find venv in project root
     3. Extract Python version from config if present
+
+    Note: Made async in Phase 1 to prepare for Phase 2 workspace indexing
+    and I/O-heavy operations (e.g., scanning large directories, reading
+    multiple config files in parallel).
     """
 
-def find_project_root(start_path: Path) -> Path:
-    """Find project root by locating config files."""
+async def find_project_root(start_path: Path) -> Path:
+    """Find project root by locating config files (async)."""
 
 def find_venv(project_root: Path) -> Path | None:
     """Find virtual environment for project."""
@@ -304,7 +543,81 @@ def get_python_version(project_context: ProjectContext) -> str | None:
     """Extract Python version from project config."""
 ```
 
-### 5.3 Pyright CLI Runner (Phase 1)
+### 5.3 Backend Interface Protocol
+
+**File:** `src/pyright_mcp/backends/base.py`
+
+All backends implement a common protocol for consistent error handling and testability:
+
+```python
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class PyrightBackend(Protocol):
+    """Protocol for Pyright backend implementations."""
+
+    async def check(
+        self,
+        path: Path,
+        context: ProjectContext,
+        python_version: str | None = None,
+    ) -> "DiagnosticsResult | BackendError":
+        """Run type checking on path."""
+        ...
+
+    async def shutdown(self) -> None:
+        """Clean up resources."""
+        ...
+
+
+class ErrorCode(Enum):
+    """Standard error codes for backend operations."""
+    NOT_FOUND = "not_found"              # File/executable not found
+    TIMEOUT = "timeout"                  # Operation timed out
+    PARSE_ERROR = "parse_error"          # Failed to parse output
+    LSP_CRASH = "lsp_crash"              # LSP server crashed
+    VALIDATION_ERROR = "validation_error"  # Input validation failed
+    PATH_NOT_ALLOWED = "path_not_allowed"  # Path outside workspace
+    CANCELLED = "cancelled"              # Operation cancelled
+
+
+@dataclass
+class BackendError:
+    """Unified error type for all backends (CLI and LSP)."""
+    code: ErrorCode  # Standard error code
+    message: str     # Human-readable error message
+    recoverable: bool = False  # Can operation be retried?
+
+    @classmethod
+    def not_found(cls, message: str) -> "BackendError":
+        return cls(code=ErrorCode.NOT_FOUND, message=message, recoverable=False)
+
+    @classmethod
+    def timeout(cls, message: str) -> "BackendError":
+        return cls(code=ErrorCode.TIMEOUT, message=message, recoverable=True)
+
+    @classmethod
+    def parse_error(cls, message: str) -> "BackendError":
+        return cls(code=ErrorCode.PARSE_ERROR, message=message, recoverable=False)
+
+    @classmethod
+    def lsp_crash(cls, message: str) -> "BackendError":
+        return cls(code=ErrorCode.LSP_CRASH, message=message, recoverable=True)
+
+    @classmethod
+    def validation_error(cls, message: str) -> "BackendError":
+        return cls(code=ErrorCode.VALIDATION_ERROR, message=message, recoverable=False)
+
+    @classmethod
+    def path_not_allowed(cls, message: str) -> "BackendError":
+        return cls(code=ErrorCode.PATH_NOT_ALLOWED, message=message, recoverable=False)
+
+    @classmethod
+    def cancelled(cls, message: str) -> "BackendError":
+        return cls(code=ErrorCode.CANCELLED, message=message, recoverable=True)
+```
+
+### 5.4 Pyright CLI Runner (Phase 1)
 
 **File:** `src/pyright_mcp/backends/cli_runner.py`
 
@@ -312,15 +625,28 @@ def get_python_version(project_context: ProjectContext) -> str | None:
 ```python
 @dataclass
 class Diagnostic:
-    """Single diagnostic from Pyright."""
+    """Single diagnostic from Pyright.
+
+    Uses Range object for position data, matching LSP structure.
+    This simplifies Phase 2 transition and provides consistent
+    position handling via Range.to_display() for human output.
+    """
     file: str
-    line: int           # 0-indexed
-    column: int         # 0-indexed
-    end_line: int
-    end_column: int
+    range: Range                  # 0-indexed start/end positions
     severity: Literal["error", "warning", "information"]
     message: str
-    rule: str | None    # e.g., "reportArgumentType"
+    rule: str | None = None       # e.g., "reportArgumentType"
+
+    @property
+    def start(self) -> Position:
+        """Convenience accessor for start position."""
+        return self.range.start
+
+    @property
+    def end(self) -> Position:
+        """Convenience accessor for end position."""
+        return self.range.end
+
 
 @dataclass
 class DiagnosticsResult:
@@ -331,12 +657,6 @@ class DiagnosticsResult:
     warning_count: int
     information_count: int
     time_sec: float
-
-@dataclass
-class CLIError:
-    """Error from CLI execution."""
-    code: Literal["not_found", "timeout", "parse_error", "execution_error"]
-    message: str
 ```
 
 **Functions:**
@@ -380,7 +700,7 @@ async def run_check(
 }
 ```
 
-### 5.4 LSP Client (Phase 2)
+### 5.5 LSP Client (Phase 2)
 
 **File:** `src/pyright_mcp/backends/lsp_client.py`
 
@@ -407,14 +727,15 @@ class LSPClient:
         self._idle_timeout = idle_timeout
         self._request_id = 0
         self._lock = asyncio.Lock()
+        self._documents = DocumentManager()
 
     async def ensure_initialized(self, workspace_root: Path) -> None:
         """Start LSP if not running, reinitialize if workspace changed."""
 
-    async def hover(self, file: Path, line: int, column: int) -> HoverResult | None:
+    async def hover(self, file: Path, line: int, column: int) -> HoverResult | BackendError:
         """Send textDocument/hover request."""
 
-    async def definition(self, file: Path, line: int, column: int) -> list[Location]:
+    async def definition(self, file: Path, line: int, column: int) -> list[Location] | BackendError:
         """Send textDocument/definition request."""
 
     async def shutdown(self) -> None:
@@ -439,6 +760,95 @@ Client → Server: initialized {}
 // Ready for requests
 ```
 
+### 5.6 Document Lifecycle Management (Phase 2)
+
+**File:** `src/pyright_mcp/backends/document_manager.py`
+
+LSP requires explicit document open/close notifications. The DocumentManager tracks opened documents to avoid redundant didOpen calls and ensure proper cleanup.
+
+**Design Decisions:**
+- **didOpen strategy:** Send once per unique file, track in memory
+- **didClose strategy:** Send on idle timeout or workspace change (not per-request)
+- **Content sync:** Read from disk on first open; Pyright watches files for changes
+
+```python
+@dataclass
+class OpenDocument:
+    """Tracked open document state."""
+    uri: str
+    version: int
+    opened_at: float  # timestamp
+
+class DocumentManager:
+    """Track opened documents for LSP lifecycle."""
+
+    def __init__(self):
+        self._opened: dict[Path, OpenDocument] = {}
+
+    def is_open(self, path: Path) -> bool:
+        """Check if document is already open."""
+        return path in self._opened
+
+    async def ensure_open(self, lsp: "LSPClient", path: Path) -> None:
+        """
+        Send didOpen if document not already open.
+
+        Reads current file content from disk.
+        """
+        if path in self._opened:
+            return
+
+        content = path.read_text(encoding="utf-8")
+        uri = path_to_uri(path)
+
+        await lsp._send_notification("textDocument/didOpen", {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "python",
+                "version": 1,
+                "text": content,
+            }
+        })
+
+        self._opened[path] = OpenDocument(
+            uri=uri,
+            version=1,
+            opened_at=time.time(),
+        )
+
+    async def close_all(self, lsp: "LSPClient") -> None:
+        """Send didClose for all tracked documents."""
+        for path, doc in self._opened.items():
+            await lsp._send_notification("textDocument/didClose", {
+                "textDocument": {"uri": doc.uri}
+            })
+        self._opened.clear()
+
+    def clear(self) -> None:
+        """Clear tracking without sending notifications (e.g., after LSP crash)."""
+        self._opened.clear()
+```
+
+**Lifecycle Flow:**
+```
+hover(file.py)
+    │
+    ├── DocumentManager.ensure_open(file.py)
+    │       │
+    │       ├── (if not open) → didOpen notification
+    │       └── (if open) → skip
+    │
+    └── textDocument/hover request
+
+LSP idle timeout or workspace change:
+    │
+    └── DocumentManager.close_all()
+            │
+            └── didClose for each tracked document
+```
+
+### 5.7 LSP Data Structures
+
 **Data Structures:**
 ```python
 @dataclass
@@ -446,33 +856,46 @@ class HoverResult:
     """Result from get_hover operation."""
     type_info: str | None       # Type signature
     documentation: str | None   # Docstring
-    range: Range | None         # Source range of symbol
+    range: Range | None         # Source range of symbol (uses utils/position.py Range)
 
 @dataclass
 class Location:
-    """A location in a file."""
+    """A location in a file (uses Position from utils)."""
     file: str
-    line: int
-    column: int
-
-@dataclass
-class Range:
-    """A range in a file."""
-    start_line: int
-    start_column: int
-    end_line: int
-    end_column: int
+    position: Position          # 0-indexed position
 ```
 
-### 5.5 Tools Layer
+### 5.8 Tools Layer
 
 **File:** `src/pyright_mcp/tools/`
 
 Each tool:
-1. Validates input
+1. Validates input (using validation module from Section 4.4)
 2. Detects project context
 3. Delegates to appropriate backend
 4. Formats response for LLM consumption
+
+**Response Format (Discriminated Union):**
+
+All tools use a discriminated union pattern with `status` field for clear success/error handling:
+
+```python
+# Success response
+{
+    "status": "success",
+    "summary": "...",
+    "data": { ... }
+}
+
+# Error response
+{
+    "status": "error",
+    "error_code": "file_not_found",
+    "message": "Human-readable error message"
+}
+```
+
+**Rationale:** This pattern eliminates ambiguity in client-side handling. Clients check `status` first rather than probing for error fields mixed with success fields.
 
 **Tool Interfaces:**
 ```python
@@ -482,20 +905,28 @@ async def check_types(
     python_version: str | None = None,
 ) -> dict:
     """
-    Returns:
+    Returns (success):
         {
+            "status": "success",
             "summary": "Analyzed 5 files in 0.45s. Found 1 error(s).",
             "error_count": 1,
             "warning_count": 0,
             "diagnostics": [
                 {
                     "file": "/path/to/file.py",
-                    "location": "10:5",
+                    "location": "10:5",  # 1-indexed for human readability
                     "severity": "error",
                     "message": "...",
                     "rule": "reportArgumentType"
                 }
             ]
+        }
+
+    Returns (error):
+        {
+            "status": "error",
+            "error_code": "file_not_found",
+            "message": "Path not found: /path/to/file.py"
         }
     """
 
@@ -506,15 +937,27 @@ async def get_hover(
     column: int,
 ) -> dict:
     """
-    Returns:
+    Returns (success):
         {
+            "status": "success",
             "symbol": "add",
             "type": "(x: int, y: int) -> int",
             "documentation": "Add two integers.",
         }
-        OR
+
+    Returns (no info):
         {
-            "error": "No information available at this position"
+            "status": "success",
+            "symbol": null,
+            "type": null,
+            "documentation": null
+        }
+
+    Returns (error):
+        {
+            "status": "error",
+            "error_code": "lsp_crash",
+            "message": "LSP server crashed, please retry"
         }
     """
 
@@ -525,24 +968,76 @@ async def go_to_definition(
     column: int,
 ) -> dict:
     """
-    Returns:
+    Returns (single definition):
         {
-            "definition": {
-                "file": "/path/to/module.py",
-                "line": 5,
-                "column": 4
-            }
+            "status": "success",
+            "definitions": [
+                {
+                    "file": "/path/to/module.py",
+                    "line": 5,
+                    "column": 4
+                }
+            ]
         }
-        OR
+
+    Returns (no definition):
         {
-            "definitions": [ ... ]  // Multiple definitions
+            "status": "success",
+            "definitions": []
         }
-        OR
+
+    Returns (error):
         {
-            "error": "No definition found"
+            "status": "error",
+            "error_code": "file_not_found",
+            "message": "File not found: /path/to/file.py"
         }
     """
 ```
+
+### 5.9 Health Check Tool
+
+**File:** `src/pyright_mcp/tools/health_check.py`
+
+**Purpose:** Diagnostic tool for verifying server configuration and runtime state.
+
+**Enabled by:** `PYRIGHT_MCP_ENABLE_HEALTH_CHECK` environment variable (default: true)
+
+**Interface:**
+```python
+async def health_check() -> dict:
+    """
+    Check server health and configuration.
+
+    Returns diagnostic information about:
+    - Pyright CLI version and availability
+    - LSP server status (if initialized)
+    - Current configuration
+    - Runtime statistics
+
+    Returns:
+        {
+            "status": "success",
+            "pyright_version": "1.1.350",
+            "pyright_available": true,
+            "lsp_status": "not_initialized" | "running" | "crashed",
+            "config": {
+                "allowed_paths": ["/path/to/workspace"],
+                "cli_timeout": 30,
+                "lsp_timeout": 300,
+                "log_mode": "stderr",
+                "log_level": "INFO"
+            },
+            "uptime_seconds": 123.45
+        }
+    """
+```
+
+**Implementation Notes:**
+- Check Pyright CLI availability: `pyright --version`
+- Query LSP client state (if Phase 2 implemented)
+- Sanitize config (don't expose sensitive paths in untrusted mode)
+- Include basic runtime stats (uptime, request count)
 
 ---
 
@@ -603,6 +1098,71 @@ Claude Code                pyright-mcp                    LSP Server
     │  { type, documentation }  │                              │
 ```
 
+### 6.3 Cancellation Support (Phase 2+)
+
+**File:** `src/pyright_mcp/utils/cancellation.py`
+
+MCP protocol supports request cancellation via notifications. This allows clients to cancel long-running operations.
+
+**CancellationToken:**
+```python
+class CancellationToken:
+    """Token for checking if operation has been cancelled."""
+
+    def __init__(self):
+        self._cancelled = False
+        self._callbacks: list[Callable[[], None]] = []
+
+    def cancel(self) -> None:
+        """Mark operation as cancelled and run callbacks."""
+        self._cancelled = True
+        for callback in self._callbacks:
+            callback()
+
+    def is_cancelled(self) -> bool:
+        """Check if operation has been cancelled."""
+        return self._cancelled
+
+    def on_cancel(self, callback: Callable[[], None]) -> None:
+        """Register callback to run when cancelled."""
+        self._callbacks.append(callback)
+
+    def raise_if_cancelled(self) -> None:
+        """Raise exception if cancelled."""
+        if self._cancelled:
+            raise CancellationError("Operation cancelled")
+
+
+class CancellationError(Exception):
+    """Raised when operation is cancelled."""
+    pass
+```
+
+**Cancellation Flow:**
+```
+Client                     pyright-mcp                    Backend
+  │                             │                             │
+  │  request (id=123)           │                             │
+  │────────────────────────────►│                             │
+  │                             │  start operation            │
+  │                             │────────────────────────────►│
+  │                             │                             │
+  │  cancel notification (123)  │                             │
+  │────────────────────────────►│                             │
+  │                             │  token.cancel()             │
+  │                             │  kill subprocess / abort    │
+  │                             │────────────────────────────►│
+  │                             │                             │
+  │◄────────────────────────────│                             │
+  │  { status: "error",                                       │
+  │    error_code: "cancelled" }│                             │
+```
+
+**Integration with Backends:**
+- CLI backend: Kill subprocess on cancellation
+- LSP backend: Send `$/cancelRequest` to language server
+- Check `token.is_cancelled()` at async yield points
+
 ---
 
 ## 7. Error Handling
@@ -619,14 +1179,16 @@ Claude Code                pyright-mcp                    LSP Server
 
 ### 7.2 Error Response Format
 
-All tools return errors in a consistent format:
+All tools return errors using the discriminated union pattern (matching Section 5.8):
 ```python
 {
-    "error": "Human-readable error message",
+    "status": "error",
     "error_code": "file_not_found",  # machine-readable code
-    "details": { ... }  # optional additional context
+    "message": "Human-readable error message"
 }
 ```
+
+**Note:** The `status` field distinguishes success from error responses. Clients check `status` first.
 
 ### 7.3 LSP Recovery Strategy
 
@@ -655,11 +1217,23 @@ async def _handle_lsp_error(self, error: Exception) -> None:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `PYRIGHT_MCP_ALLOWED_PATHS` | (none) | Colon-separated list of allowed workspace paths. If not set, all paths allowed. |
 | `PYRIGHT_MCP_LOG_MODE` | `stderr` | Logging mode: `stderr`, `file`, or `both` |
 | `PYRIGHT_MCP_LOG_LEVEL` | `INFO` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `PYRIGHT_MCP_LSP_COMMAND` | `pyright-langserver` | LSP server binary |
-| `PYRIGHT_MCP_LSP_TIMEOUT` | `300` | LSP idle timeout (seconds) |
-| `PYRIGHT_MCP_CLI_TIMEOUT` | `30` | CLI execution timeout (seconds) |
+| `PYRIGHT_MCP_LSP_COMMAND` | `pyright-langserver` | LSP server binary (Phase 2+) |
+| `PYRIGHT_MCP_LSP_TIMEOUT` | `300` | LSP idle timeout in seconds (Phase 2+) |
+| `PYRIGHT_MCP_CLI_TIMEOUT` | `30` | CLI execution timeout in seconds |
+| `PYRIGHT_MCP_ENABLE_HEALTH_CHECK` | `true` | Enable `health_check` tool |
+| `PYRIGHT_MCP_TRANSPORT` | (none) | Transport mode: `stdio` (default), `http`, `sse` (Phase 3) |
+
+**Workspace Restriction Example:**
+```bash
+# Allow access only to specific projects
+export PYRIGHT_MCP_ALLOWED_PATHS="/home/user/projects:/home/user/work"
+
+# Allow all paths (default behavior)
+unset PYRIGHT_MCP_ALLOWED_PATHS
+```
 
 ### 8.2 Logging Strategy
 
@@ -672,6 +1246,27 @@ async def _handle_lsp_error(self, error: Exception) -> None:
 | `both` | stderr + file | JSON + Human | Debugging production issues |
 
 **File:** `src/pyright_mcp/logging_config.py`
+
+**Initialization Pattern:**
+
+Logging must be initialized explicitly in `__main__.py`, NOT at module import time. This avoids:
+- Import side effects that complicate testing
+- Inability to control logging in unit tests
+- Issues with multiple entry points
+
+```python
+# __main__.py (correct)
+from .logging_config import setup_logging
+from .server import create_mcp_server
+
+def main():
+    setup_logging()  # Explicit initialization
+    mcp = create_mcp_server()
+    mcp.run()
+
+# server.py (incorrect - avoid)
+# setup_logging()  # DON'T call at import time
+```
 
 ```python
 import logging
@@ -908,8 +1503,10 @@ sample_files/
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `mcp` | >= 1.0.0 | MCP SDK (includes FastMCP) |
+| `mcp` | >= 1.1.0 | MCP SDK (includes FastMCP) |
 | `pyright` | >= 1.1.0 | Type checker (CLI + LSP) |
+
+**Note:** The `mcp[cli]` extra is deprecated. Use `mcp>=1.1.0` directly.
 
 ### 12.2 Development Dependencies
 
@@ -965,23 +1562,154 @@ Or for development:
 
 ---
 
-## 14. Open Technical Decisions
+## 14. Implementation Phases
 
-### 14.1 Resolved
+### 14.1 Phase 1: CLI-based check_types (Current)
 
-| Decision | Resolution | Rationale |
-|----------|------------|-----------|
-| CLI vs LSP | CLI for Phase 1, LSP for Phase 2 | CLI simpler for diagnostics, LSP required for hover/definition |
-| Single vs multi-project | Single first | Covers common case, defer complexity |
-| Transport | stdio default | Standard for local MCP servers |
+**Deliverables:**
+- `check_types` tool using Pyright CLI (`--outputjson`)
+- Project detection (async, prepares for Phase 2)
+- Input validation and path restriction
+- Configuration module
+- Logging infrastructure
+- Health check tool
 
-### 14.2 Deferred
+**Backend:** CLI only
 
-| Decision | Options | Decide When |
-|----------|---------|-------------|
-| LSP library | pygls vs raw JSON-RPC | Phase 2 implementation |
-| Caching strategy | None vs file-based vs in-memory | After performance profiling |
-| Multi-project handling | Reinit vs multiple instances | When use case emerges |
+**Status:** In progress
+
+### 14.2 Phase 2: LSP Integration
+
+**Scope:** Add hover and go-to-definition using Pyright LSP server
+
+**Architecture Changes:**
+
+1. **LSP Backend for ALL Tools (Including check_types)**
+   - `check_types` uses `textDocument/publishDiagnostics` from LSP
+   - Hover uses `textDocument/hover`
+   - Go-to-definition uses `textDocument/definition`
+   - CLI becomes fallback only (when LSP not initialized)
+
+2. **Document Manager**
+   - Track opened documents with `didOpen`/`didClose` lifecycle
+   - Send `didOpen` once per unique file
+   - Send `didClose` on idle timeout or workspace change
+   - Read file content from disk (Pyright watches for changes)
+
+3. **LSP Lifecycle Management**
+   - Lazy initialization: start LSP on first request
+   - Idle timeout: shutdown after 5 minutes of inactivity
+   - Crash recovery: restart LSP on next request if crashed
+   - Workspace switching: reinitialize if project root changes
+
+4. **Backend Selection Strategy**
+   - Prefer LSP if already running (warm path, < 200ms)
+   - Fall back to CLI if LSP not initialized (avoid cold start delay)
+   - Use CLI for initial `check_types` in new workspace
+   - Subsequent operations use LSP (warm and fast)
+
+**New Files:**
+```
+src/pyright_mcp/
+├── backends/
+│   ├── lsp_client.py         # LSP subprocess manager
+│   ├── document_manager.py   # didOpen/didClose tracking
+│   └── backend_selector.py   # Choose CLI vs LSP
+└── tools/
+    ├── hover.py              # get_hover tool
+    └── definition.py         # go_to_definition tool
+```
+
+**LSP Communication:**
+- Use raw JSON-RPC over stdin/stdout (no pygls dependency)
+- Initialize sequence: `initialize` → `initialized` → ready
+- Document sync: `didOpen` (with content) → watch files → `didClose`
+- Requests: `textDocument/hover`, `textDocument/definition`, `textDocument/publishDiagnostics`
+
+**Testing Strategy:**
+- Mock LSP responses for unit tests
+- Record real LSP interactions for integration tests
+- Test LSP crash recovery and restart
+- Test workspace switching and reinitialization
+
+**Deliverables:**
+- `get_hover` tool
+- `go_to_definition` tool
+- LSP client with lifecycle management
+- Document manager
+- Backend selection logic
+- LSP integration tests
+
+### 14.3 Phase 3: Polish and Optimization
+
+**Scope:** Completions, caching, performance, optional transports
+
+**Features:**
+
+1. **get_completions Tool**
+   - Use `textDocument/completion` LSP request
+   - Return completion items with type info and documentation
+   - Support trigger characters (`.`, `(`, etc.)
+
+2. **Result Caching**
+   - Cache diagnostics by file content hash
+   - Cache hover results by (file, position)
+   - Invalidate on file changes (use LSP file watching)
+   - LRU eviction policy
+
+3. **Rate Limiting**
+   - Per-tool rate limits (e.g., 10 requests/second)
+   - Prevent abuse from runaway clients
+   - Configurable via environment variables
+
+4. **Alternative Transports**
+   - HTTP transport: RESTful API for diagnostics
+   - SSE transport: Server-sent events for streaming diagnostics
+   - Configured via `PYRIGHT_MCP_TRANSPORT` env var
+   - stdio remains default for Claude Code
+
+5. **Performance Metrics**
+   - Track operation latencies (p50, p95, p99)
+   - Count cache hits/misses
+   - Log slow operations (> 1s)
+   - Export metrics via health_check tool
+
+6. **Multi-Project LSP Pooling**
+   - Run separate LSP instance per workspace root
+   - Pool management: limit max instances (e.g., 5)
+   - LRU eviction when pool full
+   - Share common dependencies across workspaces
+
+**New Files:**
+```
+src/pyright_mcp/
+├── cache/
+│   ├── result_cache.py       # Content-hash based caching
+│   └── file_watcher.py       # LSP file event integration
+├── rate_limit/
+│   └── limiter.py            # Per-tool rate limiting
+├── transports/
+│   ├── http_server.py        # HTTP transport
+│   └── sse_server.py         # SSE transport
+└── tools/
+    └── completions.py        # get_completions tool
+```
+
+**Environment Variables:**
+```bash
+PYRIGHT_MCP_TRANSPORT=stdio|http|sse  # Transport mode
+PYRIGHT_MCP_CACHE_ENABLED=true        # Enable result caching
+PYRIGHT_MCP_RATE_LIMIT=10             # Requests per second
+PYRIGHT_MCP_LSP_POOL_SIZE=5           # Max LSP instances
+```
+
+**Deliverables:**
+- `get_completions` tool
+- Result caching with file watching
+- Rate limiting infrastructure
+- HTTP and SSE transports
+- Performance metrics
+- Multi-project LSP pooling
 
 ---
 
@@ -991,3 +1719,5 @@ Or for development:
 |---------|------|--------|---------|
 | 0.1 | 2025-01-21 | Claude Code | Initial draft |
 | 0.2 | 2026-01-21 | Claude Code | Added Section 3 (Position Indexing), Section 4 (Utilities), Section 8.2 (Logging Strategy), renumbered sections |
+| 0.3 | 2026-01-21 | Claude Code | Added Section 5.3 (Backend Interface Protocol with BackendError), Section 5.6 (Document Lifecycle Management), updated Diagnostic to Range-based design, discriminated union response format, explicit logging initialization pattern, context/ module reorganization, mcp dependency update |
+| 0.4 | 2026-01-21 | Claude Code | Added Section 4.4 (Input Validation), Section 5.1.1 (Configuration Module), Section 5.9 (Health Check Tool), Section 6.3 (Cancellation Support). Updated Section 5.2 (async project detection), Section 5.3 (ErrorCode enum), Section 8.1 (new env vars: ALLOWED_PATHS, ENABLE_HEALTH_CHECK, TRANSPORT). Expanded Section 14 with detailed Phase 2 (LSP for all tools, document manager, backend selection) and Phase 3 (completions, caching, rate limiting, transports, metrics, LSP pooling) implementation plans. |

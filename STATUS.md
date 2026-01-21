@@ -40,8 +40,8 @@ For project overview, see [README.md](README.md).
 | Phase | Status | Deliverables |
 |-------|--------|--------------|
 | **1: MVP** | **Complete** | `check_types`, `health_check` tools via CLI |
-| **2: LSP** | Planned | `get_hover`, `go_to_definition` via LSP |
-| **3: Polish** | Planned | `get_completions`, caching, optimization |
+| **2: LSP** | Planned | `get_hover`, `go_to_definition` via LSP; CLI stays for `check_types` |
+| **3: Production** | Planned | `get_completions`, `find_references`, LSP pooling, metrics |
 
 ---
 
@@ -78,15 +78,33 @@ tests/
 
 ---
 
-## Next Phase: Phase 2 (LSP)
+## Next Phase: Phase 2 (LSP for Hover/Definition)
 
-**Scope:** Add hover and go-to-definition via LSP
+**Scope:** Add `get_hover` and `go_to_definition` via Pyright LSP
 
-**Key additions:**
-- `backends/lsp_client.py` - LSP subprocess management
-- `backends/document_manager.py` - Document lifecycle
+**Key architectural decision:** LSP for IDE features only, CLI stays for type checking
+- `check_types` → CLI (publishDiagnostics is async notification, not request)
+- `get_hover` → LSP (textDocument/hover is sync request/response)
+- `go_to_definition` → LSP (textDocument/definition is sync request/response)
+
+**New files:**
+- `backends/lsp_client.py` - LSP subprocess + JSON-RPC
+- `backends/document_manager.py` - didOpen/didClose lifecycle
 - `tools/hover.py` - get_hover MCP tool
 - `tools/definition.py` - go_to_definition MCP tool
+
+**Modified files:**
+- `backends/base.py` - HoverBackend, DefinitionBackend protocols
+- `backends/selector.py` - HybridSelector (CLI for check, LSP for hover/def)
+
+**Implementation order:**
+1. Protocol extension (base.py)
+2. LSP client (lsp_client.py)
+3. Hover tool (hover.py)
+4. Document manager (document_manager.py)
+5. Definition tool (definition.py)
+6. Selector update (selector.py)
+7. Integration tests
 
 See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for full plan.
 

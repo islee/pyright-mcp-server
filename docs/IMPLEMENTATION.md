@@ -1959,147 +1959,752 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 
 ## Next Steps (Phase 2)
 
-### Phase 2: LSP Integration for ALL Tools
+### Phase 2: LSP Integration for Hover and Definition
 
-**Goal:** Add hover and go-to-definition using Pyright LSP server
+**Goal:** Add `get_hover` and `go_to_definition` tools using Pyright LSP server
 
-**Key Architectural Decision:** LSP backend for ALL tools (including check_types)
-- `check_types` will use `textDocument/publishDiagnostics` from LSP
-- Hover uses `textDocument/hover`
-- Go-to-definition uses `textDocument/definition`
-- CLI becomes fallback only when LSP not initialized
-- Prefer LSP for warm operations (< 200ms), fall back to CLI for cold start
+**Key Architectural Decision:** LSP for IDE features only, CLI stays for type checking
+
+| Tool | Backend | Rationale |
+|------|---------|-----------|
+| `check_types` | CLI | Synchronous, predictable; `publishDiagnostics` is async notification |
+| `get_hover` | LSP | `textDocument/hover` is synchronous request/response |
+| `go_to_definition` | LSP | `textDocument/definition` is synchronous request/response |
+
+**Why NOT use LSP for check_types:** The `textDocument/publishDiagnostics` is a server→client *notification*, not a request. You cannot "request" diagnostics - they're published asynchronously after document changes. This makes it unsuitable for on-demand type checking.
+
+---
 
 **Phase 2 Implementation Tasks:**
 
-1. **LSP Client Infrastructure** (`src/pyright_mcp/backends/lsp_client.py`)
-   - Subprocess management for `pyright-langserver --stdio`
-   - Lazy initialization: start on first request (avoid cold start)
-   - Idle timeout: shutdown after 5 minutes of inactivity
-   - Crash recovery: restart on next request if crashed
-   - Workspace switching: reinitialize if project root changes
-   - JSON-RPC communication over stdin/stdout (no pygls dependency)
-   - Request/response correlation with message IDs
+#### 1. Protocol Extension (`src/pyright_mcp/backends/base.py`)
 
-2. **Document Manager** (`src/pyright_mcp/backends/document_manager.py`)
-   - Track opened documents for `didOpen`/`didClose` lifecycle
-   - Send `didOpen` once per unique file with file content
-   - Read file content from disk (Pyright watches for changes)
-   - Send `didClose` on idle timeout or workspace change
-   - Clear tracking on LSP crash (don't send didClose)
+Extend backend protocols to support hover and definition:
 
-3. **Backend Selector** (`src/pyright_mcp/backends/backend_selector.py`)
-   - Choose between CLI and LSP based on state
-   - Prefer LSP if already running (warm path, < 200ms)
-   - Fall back to CLI if LSP not initialized (avoid cold start delay)
-   - Use CLI for initial `check_types` in new workspace
-   - Subsequent operations use LSP (warm and fast)
-   - Handle workspace switching (reinit LSP)
+```python
+class HoverBackend(Protocol):
+    """Protocol for hover operations."""
 
-4. **Hover Tool** (`src/pyright_mcp/tools/hover.py`)
-   - `textDocument/hover` LSP request
-   - Return type info and documentation
-   - Use DocumentManager for didOpen tracking
-   - Format: `{"status": "success", "type": "...", "documentation": "..."}`
+    async def hover(
+        self, path: Path, line: int, column: int, *, project_root: Path | None = None
+    ) -> HoverResult:
+        """Get hover information at position."""
+        ...
 
-5. **Definition Tool** (`src/pyright_mcp/tools/definition.py`)
-   - `textDocument/definition` LSP request
-   - Return definition location(s)
-   - Handle multiple definitions (list)
-   - Format: `{"status": "success", "definitions": [{"file": "...", "line": 0, "column": 0}]}`
+class DefinitionBackend(Protocol):
+    """Protocol for go-to-definition operations."""
 
-6. **Update check_types Tool**
-   - Add LSP backend support via backend_selector
-   - Use `textDocument/publishDiagnostics` from LSP
-   - Fall back to CLI backend when cold
-   - Maintain same external interface (backwards compatible)
+    async def definition(
+        self, path: Path, line: int, column: int, *, project_root: Path | None = None
+    ) -> list[Location]:
+        """Get definition locations for symbol at position."""
+        ...
+```
 
-7. **LSP Tests**
-   - Mock LSP responses for unit tests
-   - Record real LSP interactions for integration tests (recorded responses)
-   - Test LSP crash recovery and restart
-   - Test workspace switching and reinitialization
-   - Test document lifecycle (didOpen/didClose)
+New data structures:
+```python
+@dataclass
+class HoverResult:
+    """Result from hover operation."""
+    type_info: str | None      # Type signature
+    documentation: str | None  # Docstring
+    symbol: str | None         # Symbol name
 
-**LSP Communication Details:**
-- Raw JSON-RPC over stdin/stdout (no pygls)
-- Initialize sequence: `initialize` → `initialized` → ready
-- Document sync: `didOpen` (with content) → watch files → `didClose`
-- Requests: `textDocument/hover`, `textDocument/definition`, `textDocument/publishDiagnostics`
+@dataclass
+class Location:
+    """A location in a file."""
+    file: Path
+    line: int    # 0-indexed
+    column: int  # 0-indexed
+```
+
+#### 2. LSP Client Infrastructure (`src/pyright_mcp/backends/lsp_client.py`)
+
+Core LSP subprocess manager:
+
+- **Subprocess management:** Spawn `pyright-langserver --stdio`
+- **JSON-RPC communication:** Raw protocol over stdin/stdout (no pygls dependency)
+- **Request correlation:** Message IDs for matching requests to responses
+- **Lifecycle states:** `not_started` → `initializing` → `ready` → `shutdown`
+
+Lifecycle management:
+- **Lazy start:** Initialize on first hover/definition request
+- **Idle timeout:** Shutdown after 5 minutes of inactivity (configurable)
+- **Crash recovery:** Detect subprocess death, restart on next request
+- **Workspace binding:** One LSP instance per workspace root
+
+```python
+class LSPClient:
+    """Manages pyright-langserver subprocess."""
+
+    async def ensure_ready(self, workspace_root: Path) -> None:
+        """Start LSP if not running, or reinit if workspace changed."""
+
+    async def hover(self, uri: str, line: int, column: int) -> dict | None:
+        """Send textDocument/hover request."""
+
+    async def definition(self, uri: str, line: int, column: int) -> list[dict]:
+        """Send textDocument/definition request."""
+
+    async def shutdown(self) -> None:
+        """Gracefully shutdown LSP subprocess."""
+```
+
+**LSP Initialization Sequence:**
+```
+1. spawn pyright-langserver --stdio
+2. send: initialize { rootUri, capabilities }
+3. recv: InitializeResult
+4. send: initialized {}
+5. ready for requests
+```
+
+#### 3. Document Manager (`src/pyright_mcp/backends/document_manager.py`)
+
+Track document lifecycle with concurrency safety:
+
+```python
+class DocumentManager:
+    """Track opened documents for LSP didOpen/didClose lifecycle."""
+
+    _opened: dict[Path, OpenDocument]
+    _locks: dict[Path, asyncio.Lock]  # Per-file locking for concurrency
+
+    async def ensure_open(self, lsp: LSPClient, path: Path) -> None:
+        """Send didOpen if not already open (thread-safe)."""
+        async with self._get_lock(path):
+            if path in self._opened:
+                return
+            content = await asyncio.to_thread(path.read_text, encoding="utf-8")
+            await lsp.send_notification("textDocument/didOpen", {...})
+            self._opened[path] = OpenDocument(uri=..., version=1)
+
+    async def close_all(self, lsp: LSPClient) -> None:
+        """Send didClose for all tracked documents."""
+
+    def clear(self) -> None:
+        """Clear tracking without notifications (after LSP crash)."""
+```
+
+**Edge cases handled:**
+- Concurrent requests for same file → per-file locking
+- LSP crash → clear() without didClose
+- File changes → rely on Pyright's file watcher
+- Large files → async file read to avoid blocking
+
+#### 4. Backend Selector Update (`src/pyright_mcp/backends/selector.py`)
+
+Extend selector for operation-specific backends:
+
+```python
+class BackendSelector(ABC):
+    """Abstract base for selecting appropriate backend."""
+
+    @abstractmethod
+    async def get_check_backend(self, path: Path) -> CheckBackend:
+        """Get backend for type checking (always CLI in Phase 2)."""
+
+    @abstractmethod
+    async def get_hover_backend(self, path: Path) -> HoverBackend:
+        """Get backend for hover (LSP, starts if needed)."""
+
+    @abstractmethod
+    async def get_definition_backend(self, path: Path) -> DefinitionBackend:
+        """Get backend for definition (LSP, starts if needed)."""
+
+
+class HybridSelector(BackendSelector):
+    """Phase 2 selector - CLI for check, LSP for hover/definition."""
+
+    def __init__(self) -> None:
+        self._cli = PyrightCLIRunner()
+        self._lsp: LSPClient | None = None
+        self._documents = DocumentManager()
+
+    async def get_check_backend(self, path: Path) -> CheckBackend:
+        return self._cli  # Always CLI
+
+    async def get_hover_backend(self, path: Path) -> HoverBackend:
+        await self._ensure_lsp(path)
+        return self._lsp
+```
+
+**Workspace detection:** Derive from `ProjectContext.root` (already computed per-request)
+
+#### 5. Hover Tool (`src/pyright_mcp/tools/hover.py`)
+
+```python
+async def get_hover(
+    file: str,
+    line: int,      # 0-indexed
+    column: int,    # 0-indexed
+) -> dict:
+    """
+    Get type and documentation info at a position.
+
+    Returns (success with info):
+        {
+            "status": "success",
+            "symbol": "add",
+            "type": "(x: int, y: int) -> int",
+            "documentation": "Add two integers."
+        }
+
+    Returns (success, no info at position):
+        {
+            "status": "success",
+            "symbol": null,
+            "type": null,
+            "documentation": null
+        }
+
+    Returns (error):
+        {
+            "status": "error",
+            "error_code": "file_not_found",
+            "message": "..."
+        }
+    """
+```
+
+#### 6. Definition Tool (`src/pyright_mcp/tools/definition.py`)
+
+```python
+async def go_to_definition(
+    file: str,
+    line: int,      # 0-indexed
+    column: int,    # 0-indexed
+) -> dict:
+    """
+    Get definition location(s) for symbol at position.
+
+    Returns (found):
+        {
+            "status": "success",
+            "definitions": [
+                {"file": "/path/to/module.py", "line": 5, "column": 4}
+            ]
+        }
+
+    Returns (not found):
+        {
+            "status": "success",
+            "definitions": []
+        }
+    """
+```
+
+#### 7. Error Code Standardization
+
+Migrate from string error codes to enum (deferred from Phase 1):
+
+```python
+class ErrorCode(str, Enum):
+    """Standardized error codes for all backends."""
+    NOT_FOUND = "not_found"
+    TIMEOUT = "timeout"
+    PARSE_ERROR = "parse_error"
+    INVALID_PATH = "invalid_path"
+    EXECUTION_ERROR = "execution_error"
+    LSP_ERROR = "lsp_error"
+    LSP_NOT_READY = "lsp_not_ready"
+    CANCELLED = "cancelled"
+```
+
+#### 8. LSP Tests
+
+**Unit tests (mocked):**
+- JSON-RPC message formatting
+- Request/response correlation
+- Lifecycle state transitions
+- Document manager concurrency
+
+**Integration tests (recorded responses):**
+- Record real pyright-langserver responses as fixtures
+- Test hover for various symbol types (function, class, variable)
+- Test definition for local and imported symbols
+- Test LSP crash and recovery
+- Test workspace switching
+
+---
+
+**Implementation Order:**
+
+```
+1. base.py updates      → Add HoverResult, Location, protocols
+2. lsp_client.py        → JSON-RPC, lifecycle (no document tracking yet)
+3. hover.py             → First LSP tool, validates client works
+4. document_manager.py  → Factor out after hover works
+5. definition.py        → Reuse document manager
+6. selector.py update   → Add HybridSelector
+7. Integration tests    → Recorded response fixtures
+```
+
+**File Structure After Phase 2:**
+```
+src/pyright_mcp/
+├── backends/
+│   ├── base.py              # + HoverResult, Location, protocols
+│   ├── cli_runner.py        # unchanged
+│   ├── lsp_client.py        # NEW: LSP subprocess manager
+│   ├── document_manager.py  # NEW: didOpen/didClose tracking
+│   └── selector.py          # + HybridSelector
+└── tools/
+    ├── check_types.py       # unchanged (stays CLI)
+    ├── health_check.py      # unchanged
+    ├── hover.py             # NEW: get_hover tool
+    └── definition.py        # NEW: go_to_definition tool
+```
 
 **Deliverables:**
-- `get_hover` tool
-- `go_to_definition` tool
+- `get_hover` tool via LSP
+- `go_to_definition` tool via LSP
 - LSP client with lifecycle management
-- Document manager
-- Backend selection logic
-- LSP integration tests
-- Updated `check_types` with dual backend support
+- Document manager with concurrency handling
+- HybridSelector for operation-specific routing
+- ErrorCode enum standardization
+- LSP integration tests with recorded fixtures
+
+**NOT in Phase 2 scope:**
+- LSP for check_types (architectural mismatch)
+- Completions (Phase 3)
+- Result caching (Phase 3)
+- Multi-workspace LSP pooling (Phase 3)
 
 ---
 
 ## Next Steps (Phase 3)
 
-### Phase 3: Polish and Optimization
+### Phase 3: Completions, References, and Multi-Workspace Support
 
-**Goal:** Completions, caching, performance optimization, alternative transports
+**Goal:** Complete IDE feature set with completions and references; production-ready multi-workspace support
+
+**Prerequisites:** Phase 2 complete (LSP client, document manager, hover, definition)
+
+---
 
 **Phase 3 Implementation Tasks:**
 
-1. **get_completions Tool** (`src/pyright_mcp/tools/completions.py`)
-   - Use `textDocument/completion` LSP request
-   - Return completion items with type info and documentation
-   - Support trigger characters (`.`, `(`, etc.)
-   - Format: `{"status": "success", "completions": [{"label": "...", "type": "...", "documentation": "..."}]}`
+#### 1. Completions Tool (`src/pyright_mcp/tools/completions.py`)
 
-2. **Result Caching** (`src/pyright_mcp/cache/`)
-   - Cache diagnostics by file content hash
-   - Cache hover results by (file, position)
-   - Invalidate on file changes (use LSP file watching)
-   - LRU eviction policy
-   - Configurable cache size and TTL
+Add code completion support using LSP `textDocument/completion`:
 
-3. **Rate Limiting** (`src/pyright_mcp/rate_limit/limiter.py`)
-   - Per-tool rate limits (configurable, e.g., 10 requests/second)
-   - Prevent abuse from runaway clients
-   - Token bucket algorithm
-   - Configurable via `PYRIGHT_MCP_RATE_LIMIT` env var
+```python
+async def get_completions(
+    file: str,
+    line: int,      # 0-indexed
+    column: int,    # 0-indexed
+    trigger: str | None = None,  # Trigger character: ".", "(", etc.
+) -> dict:
+    """
+    Get completion suggestions at a position.
 
-4. **Alternative Transports** (`src/pyright_mcp/transports/`)
-   - HTTP transport: RESTful API for diagnostics
-   - SSE transport: Server-sent events for streaming diagnostics
-   - Configured via `PYRIGHT_MCP_TRANSPORT` env var
-   - stdio remains default for Claude Code
+    Returns (success):
+        {
+            "status": "success",
+            "is_incomplete": false,
+            "completions": [
+                {
+                    "label": "append",
+                    "kind": "method",
+                    "detail": "(object) -> None",
+                    "documentation": "Append object to the end of the list.",
+                    "sort_text": "0000append"
+                }
+            ]
+        }
 
-5. **Performance Metrics**
-   - Track operation latencies (p50, p95, p99)
-   - Count cache hits/misses
-   - Log slow operations (> 1s)
-   - Export metrics via `health_check` tool
-   - Per-tool breakdown
+    Returns (no completions):
+        {
+            "status": "success",
+            "is_incomplete": false,
+            "completions": []
+        }
+    """
+```
 
-6. **Multi-Project LSP Pooling**
-   - Run separate LSP instance per workspace root
-   - Pool management: limit max instances (e.g., 5)
-   - LRU eviction when pool full
-   - Share common dependencies across workspaces
-   - Configurable via `PYRIGHT_MCP_LSP_POOL_SIZE`
+**Protocol extension:**
+```python
+class CompletionBackend(Protocol):
+    """Protocol for completion operations."""
+
+    async def complete(
+        self,
+        path: Path,
+        line: int,
+        column: int,
+        trigger: str | None = None,
+        *,
+        project_root: Path | None = None,
+    ) -> CompletionResult:
+        """Get completions at position."""
+        ...
+
+@dataclass
+class CompletionItem:
+    """Single completion suggestion."""
+    label: str                    # Display text
+    kind: str                     # "function", "method", "class", "variable", etc.
+    detail: str | None            # Type signature
+    documentation: str | None     # Docstring
+    sort_text: str | None         # Sort order hint
+
+@dataclass
+class CompletionResult:
+    """Result from completion operation."""
+    items: list[CompletionItem]
+    is_incomplete: bool           # True if more items available
+```
+
+**LSP request:**
+```json
+{
+    "method": "textDocument/completion",
+    "params": {
+        "textDocument": {"uri": "file:///path/to/file.py"},
+        "position": {"line": 10, "character": 5},
+        "context": {
+            "triggerKind": 2,
+            "triggerCharacter": "."
+        }
+    }
+}
+```
+
+**Completion kinds mapping:**
+| LSP Kind | Display |
+|----------|---------|
+| 1 | text |
+| 2 | method |
+| 3 | function |
+| 4 | constructor |
+| 5 | field |
+| 6 | variable |
+| 7 | class |
+| 8 | interface |
+| 9 | module |
+| 10 | property |
+
+#### 2. References Tool (`src/pyright_mcp/tools/references.py`)
+
+Find all references to a symbol using LSP `textDocument/references`:
+
+```python
+async def find_references(
+    file: str,
+    line: int,      # 0-indexed
+    column: int,    # 0-indexed
+    include_declaration: bool = True,
+) -> dict:
+    """
+    Find all references to symbol at position.
+
+    Returns (found):
+        {
+            "status": "success",
+            "symbol": "MyClass",
+            "references": [
+                {"file": "/path/to/file.py", "line": 10, "column": 5},
+                {"file": "/path/to/other.py", "line": 25, "column": 12}
+            ]
+        }
+
+    Returns (not found):
+        {
+            "status": "success",
+            "symbol": null,
+            "references": []
+        }
+    """
+```
+
+**Protocol extension:**
+```python
+class ReferencesBackend(Protocol):
+    """Protocol for find-references operations."""
+
+    async def references(
+        self,
+        path: Path,
+        line: int,
+        column: int,
+        include_declaration: bool = True,
+        *,
+        project_root: Path | None = None,
+    ) -> list[Location]:
+        """Find all references to symbol at position."""
+        ...
+```
+
+**LSP request:**
+```json
+{
+    "method": "textDocument/references",
+    "params": {
+        "textDocument": {"uri": "file:///path/to/file.py"},
+        "position": {"line": 10, "character": 5},
+        "context": {"includeDeclaration": true}
+    }
+}
+```
+
+#### 3. Multi-Workspace LSP Pool (`src/pyright_mcp/backends/lsp_pool.py`)
+
+Manage multiple LSP instances for users working across projects:
+
+```python
+class LSPPool:
+    """Pool of LSP clients, one per workspace root."""
+
+    def __init__(
+        self,
+        max_instances: int = 3,
+        idle_timeout: float = 300.0,
+    ):
+        self._clients: dict[Path, LSPClient] = {}
+        self._access_order: list[Path] = []  # LRU tracking
+        self._max_instances = max_instances
+        self._idle_timeout = idle_timeout
+        self._lock = asyncio.Lock()
+
+    async def get_client(self, workspace_root: Path) -> LSPClient:
+        """
+        Get or create LSP client for workspace.
+
+        - Returns existing client if available
+        - Creates new client if under limit
+        - Evicts LRU client if at limit
+        """
+        async with self._lock:
+            if workspace_root in self._clients:
+                self._touch(workspace_root)
+                return self._clients[workspace_root]
+
+            if len(self._clients) >= self._max_instances:
+                await self._evict_lru()
+
+            client = LSPClient()
+            await client.ensure_ready(workspace_root)
+            self._clients[workspace_root] = client
+            self._access_order.append(workspace_root)
+            return client
+
+    async def _evict_lru(self) -> None:
+        """Shutdown and remove least recently used client."""
+        if not self._access_order:
+            return
+        lru_root = self._access_order.pop(0)
+        client = self._clients.pop(lru_root)
+        await client.shutdown()
+
+    async def shutdown_all(self) -> None:
+        """Shutdown all pooled clients."""
+        for client in self._clients.values():
+            await client.shutdown()
+        self._clients.clear()
+        self._access_order.clear()
+```
+
+**Selector update:**
+```python
+class PooledSelector(BackendSelector):
+    """Phase 3 selector with LSP pooling."""
+
+    def __init__(self, max_lsp_instances: int = 3) -> None:
+        self._cli = PyrightCLIRunner()
+        self._pool = LSPPool(max_instances=max_lsp_instances)
+        self._documents: dict[Path, DocumentManager] = {}  # Per-workspace
+
+    async def get_hover_backend(self, path: Path) -> HoverBackend:
+        workspace = self._detect_workspace(path)
+        return await self._pool.get_client(workspace)
+```
+
+**Configuration:**
+```bash
+PYRIGHT_MCP_LSP_POOL_SIZE=3  # Max concurrent LSP instances (default: 3)
+```
+
+#### 4. Performance Metrics (`src/pyright_mcp/metrics.py`)
+
+Track operation latencies and expose via health_check:
+
+```python
+@dataclass
+class OperationMetrics:
+    """Metrics for a single operation type."""
+    count: int = 0
+    total_ms: float = 0.0
+    min_ms: float = float('inf')
+    max_ms: float = 0.0
+    errors: int = 0
+
+    def record(self, duration_ms: float, success: bool) -> None:
+        self.count += 1
+        self.total_ms += duration_ms
+        self.min_ms = min(self.min_ms, duration_ms)
+        self.max_ms = max(self.max_ms, duration_ms)
+        if not success:
+            self.errors += 1
+
+    @property
+    def avg_ms(self) -> float:
+        return self.total_ms / self.count if self.count > 0 else 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "count": self.count,
+            "avg_ms": round(self.avg_ms, 2),
+            "min_ms": round(self.min_ms, 2) if self.count > 0 else None,
+            "max_ms": round(self.max_ms, 2) if self.count > 0 else None,
+            "error_rate": round(self.errors / self.count, 3) if self.count > 0 else 0,
+        }
+
+
+class MetricsCollector:
+    """Collect and report operation metrics."""
+
+    def __init__(self):
+        self._metrics: dict[str, OperationMetrics] = defaultdict(OperationMetrics)
+        self._start_time = time.monotonic()
+
+    @contextmanager
+    def track(self, operation: str) -> Generator[None, None, None]:
+        """Context manager to track operation duration."""
+        start = time.monotonic()
+        success = True
+        try:
+            yield
+        except Exception:
+            success = False
+            raise
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            self._metrics[operation].record(duration_ms, success)
+
+    def get_summary(self) -> dict:
+        """Get metrics summary for health_check."""
+        return {
+            "uptime_seconds": round(time.monotonic() - self._start_time, 1),
+            "operations": {
+                name: metrics.to_dict()
+                for name, metrics in self._metrics.items()
+            },
+        }
+```
+
+**Integration with tools:**
+```python
+# In check_types.py
+async def check_types(path: str, ...) -> dict:
+    with metrics_collector.track("check_types"):
+        # ... existing implementation
+```
+
+**Health check extension:**
+```python
+async def health_check() -> dict:
+    return {
+        "status": "healthy",
+        # ... existing fields ...
+        "metrics": metrics_collector.get_summary(),
+        "lsp_pool": {
+            "active_instances": len(pool._clients),
+            "max_instances": pool._max_instances,
+            "workspaces": [str(p) for p in pool._clients.keys()],
+        },
+    }
+```
+
+#### 5. Signature Help Tool (`src/pyright_mcp/tools/signature.py`) [Optional]
+
+Display function signature while typing arguments:
+
+```python
+async def get_signature(
+    file: str,
+    line: int,
+    column: int,
+) -> dict:
+    """
+    Get function signature help at position (inside function call).
+
+    Returns (success):
+        {
+            "status": "success",
+            "signatures": [
+                {
+                    "label": "def print(*values, sep=' ', end='\\n', ...) -> None",
+                    "documentation": "Prints the values to a stream...",
+                    "active_parameter": 0,
+                    "parameters": [
+                        {"label": "*values", "documentation": "Values to print"},
+                        {"label": "sep", "documentation": "Separator between values"}
+                    ]
+                }
+            ],
+            "active_signature": 0
+        }
+    """
+```
+
+**LSP request:** `textDocument/signatureHelp`
+
+---
+
+**Implementation Order:**
+
+```
+1. completions.py       → High-value feature, reuses LSP infrastructure
+2. lsp_pool.py          → Critical for multi-project workflows
+3. metrics.py           → Observability foundation
+4. references.py        → Useful for refactoring assistance
+5. selector update      → PooledSelector with metrics integration
+6. signature.py         → Optional, lower priority
+7. health_check update  → Expose metrics and pool status
+```
+
+**File Structure After Phase 3:**
+```
+src/pyright_mcp/
+├── backends/
+│   ├── base.py              # + CompletionResult, CompletionItem
+│   ├── cli_runner.py        # unchanged
+│   ├── lsp_client.py        # + complete(), references(), signature()
+│   ├── lsp_pool.py          # NEW: Multi-workspace LSP pooling
+│   ├── document_manager.py  # unchanged
+│   └── selector.py          # + PooledSelector
+├── metrics.py               # NEW: Performance tracking
+└── tools/
+    ├── check_types.py       # + metrics integration
+    ├── health_check.py      # + metrics and pool status
+    ├── hover.py             # + metrics integration
+    ├── definition.py        # + metrics integration
+    ├── completions.py       # NEW: get_completions tool
+    ├── references.py        # NEW: find_references tool
+    └── signature.py         # NEW (optional): get_signature tool
+```
 
 **Environment Variables:**
 ```bash
-PYRIGHT_MCP_TRANSPORT=stdio|http|sse  # Transport mode
-PYRIGHT_MCP_CACHE_ENABLED=true        # Enable result caching
-PYRIGHT_MCP_RATE_LIMIT=10             # Requests per second
-PYRIGHT_MCP_LSP_POOL_SIZE=5           # Max LSP instances
+PYRIGHT_MCP_LSP_POOL_SIZE=3       # Max LSP instances (default: 3)
+PYRIGHT_MCP_METRICS_ENABLED=true  # Enable metrics collection (default: true)
 ```
 
 **Deliverables:**
-- `get_completions` tool
-- Result caching infrastructure with file watching
-- Rate limiting per tool
-- HTTP and SSE transports
-- Performance metrics and monitoring
-- Multi-project LSP pooling
+- `get_completions` tool via LSP
+- `find_references` tool via LSP
+- Multi-workspace LSP pooling with LRU eviction
+- Performance metrics with health_check integration
+- `get_signature` tool (optional)
+- PooledSelector for production deployments
+
+**NOT in Phase 3 scope (potential future work):**
+- Result caching (LSP handles this internally)
+- Rate limiting (single-client MCP doesn't need it)
+- HTTP/SSE transports (stdio sufficient for Claude Code)
+- Rename refactoring (complex, requires file writes)
+- Code actions/quick fixes (complex, requires file writes)
 
 ---
 

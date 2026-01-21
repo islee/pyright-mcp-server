@@ -2,30 +2,30 @@
 
 An MCP (Model Context Protocol) server that exposes Pyright's Python static type checking capabilities to LLM clients like Claude.
 
-> **Status:** Planning phase - implementation not yet started. See [STATUS.md](STATUS.md) for current progress.
+> **Status:** Phase 1 Complete - CLI-first MVP with `check_types` and `health_check` tools. See [STATUS.md](STATUS.md) for details.
 
 ## Features
 
-| Tool | Description | Phase |
-|------|-------------|-------|
-| `check_types` | Run type checking on file/directory | 1 (MVP) |
-| `health_check` | Check server health and Pyright availability | 1 (MVP) |
-| `get_hover` | Get type info and docstring at position | 2 (LSP) |
-| `go_to_definition` | Find definition location for symbol | 2 (LSP) |
-| `get_completions` | Get completion suggestions at position | 3 (Polish) |
+| Tool | Description | Phase | Status |
+|------|-------------|-------|--------|
+| `check_types` | Run type checking on file/directory | 1 (MVP) | ✓ Implemented |
+| `health_check` | Check server health and Pyright availability | 1 (MVP) | ✓ Implemented |
+| `get_hover` | Get type info and docstring at position | 2 (LSP) | Planned |
+| `go_to_definition` | Find definition location for symbol | 2 (LSP) | Planned |
+| `get_completions` | Get completion suggestions at position | 3 (Polish) | Planned |
 
 ## Installation
 
-> **Note:** Package not yet published. For now, install from source.
+### From Source (Recommended for Development)
 
 ```bash
-# Clone and install from source
 git clone https://github.com/islee/pyright-mcp-server.git
 cd pyright-mcp-server
 uv sync
+uv run python -m pyright_mcp
 ```
 
-Once published:
+### From PyPI (When Published)
 ```bash
 # Via uv (recommended)
 uv add pyright-mcp

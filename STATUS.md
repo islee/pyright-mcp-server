@@ -1,7 +1,7 @@
 # Project Status
 
 **Last Updated:** 2026-01-22
-**Current Phase:** Phase 1 Complete (PR Ready)
+**Current Phase:** Phase 2 Complete (LSP IDE Features)
 
 For project overview, see [README.md](README.md).
 
@@ -21,16 +21,27 @@ For project overview, see [README.md](README.md).
 - [x] Pyright CLI runner (`backends/cli_runner.py`)
 - [x] MCP tools (`tools/check_types.py`, `tools/health_check.py`)
 - [x] MCP server (`server.py`, `__main__.py`)
-- [x] Test suite (183 tests, 89% coverage)
 - [x] Backend selector interface (`backends/selector.py`)
+
+### Phase 2: LSP IDE Features (Complete)
+
+- [x] LSP client (`backends/lsp_client.py`) - JSON-RPC over stdin/stdout
+- [x] Document manager (`backends/document_manager.py`) - didOpen/didClose lifecycle
+- [x] Hover tool (`tools/hover.py`) - get_hover MCP tool
+- [x] Definition tool (`tools/definition.py`) - go_to_definition MCP tool
+- [x] Protocol extensions (`backends/base.py`) - HoverBackend, DefinitionBackend
+- [x] Hybrid selector (`backends/selector.py`) - CLI for check, LSP for hover/definition
+- [x] TDD updated for 1-indexed API convention
+- [x] Shared validation (`validation/inputs.py`) - validate_position_input()
+- [x] Phase 3 completion infrastructure (CompletionBackend, complete() method)
 
 ### Verification Results
 
 | Check | Status |
 |-------|--------|
-| Pyright | 0 errors |
-| Tests | 183 passed, 1 skipped |
-| Coverage | 89% |
+| Pyright | 5 warnings (FastMCP decorator, pre-existing) |
+| Tests | 270 passed, 1 skipped |
+| Coverage | 82% |
 | Ruff | Clean |
 
 ---
@@ -40,7 +51,7 @@ For project overview, see [README.md](README.md).
 | Phase | Status | Deliverables |
 |-------|--------|--------------|
 | **1: MVP** | **Complete** | `check_types`, `health_check` tools via CLI |
-| **2: LSP** | Planned | `get_hover`, `go_to_definition` via LSP; CLI stays for `check_types` |
+| **2: LSP** | **Complete** | `get_hover`, `go_to_definition` via LSP; CLI stays for `check_types` |
 | **3: Production** | Planned | `get_completions`, `find_references`, LSP pooling, metrics |
 
 ---
@@ -59,54 +70,47 @@ src/pyright_mcp/
 │   └── uri.py            # Path/URI conversion
 ├── validation/
 │   ├── paths.py          # Path validation
-│   └── inputs.py         # Input validation
+│   └── inputs.py         # Input validation (validate_position_input)
 ├── context/
 │   └── project.py        # Project detection
 ├── backends/
-│   ├── base.py           # Backend protocol
+│   ├── base.py           # Backend protocols (Backend, HoverBackend, DefinitionBackend, CompletionBackend)
 │   ├── cli_runner.py     # Pyright CLI wrapper
-│   └── selector.py       # Backend selector interface
+│   ├── lsp_client.py     # LSP subprocess + JSON-RPC (hover, definition, complete)
+│   ├── document_manager.py # LSP document lifecycle
+│   └── selector.py       # HybridSelector (CLI for check, LSP for hover/def)
 └── tools/
     ├── check_types.py    # check_types MCP tool
-    └── health_check.py   # health_check MCP tool
+    ├── health_check.py   # health_check MCP tool
+    ├── hover.py          # get_hover MCP tool
+    └── definition.py     # go_to_definition MCP tool
 
 tests/
 ├── conftest.py           # Shared fixtures
-├── unit/                 # Unit tests (167 tests)
-└── integration/          # Integration tests (16 tests)
+├── unit/                 # Unit tests (16 files)
+└── integration/          # Integration tests
 ```
 
 ---
 
-## Next Phase: Phase 2 (LSP for Hover/Definition)
+## Next Phase: Phase 3 (Production Polish)
 
-**Scope:** Add `get_hover` and `go_to_definition` via Pyright LSP
+**Scope:** Add completions, references, LSP pooling, metrics
 
-**Key architectural decision:** LSP for IDE features only, CLI stays for type checking
-- `check_types` → CLI (publishDiagnostics is async notification, not request)
-- `get_hover` → LSP (textDocument/hover is sync request/response)
-- `go_to_definition` → LSP (textDocument/definition is sync request/response)
+**New tools:**
+- `get_completions` - Code completion suggestions
+- `find_references` - Find all references to symbol
 
-**New files:**
-- `backends/lsp_client.py` - LSP subprocess + JSON-RPC
-- `backends/document_manager.py` - didOpen/didClose lifecycle
-- `tools/hover.py` - get_hover MCP tool
-- `tools/definition.py` - go_to_definition MCP tool
+**New infrastructure:**
+- `backends/lsp_pool.py` - Multi-workspace LSP pooling with LRU eviction
+- `metrics.py` - Performance tracking
 
-**Modified files:**
-- `backends/base.py` - HoverBackend, DefinitionBackend protocols
-- `backends/selector.py` - HybridSelector (CLI for check, LSP for hover/def)
+**Foundations already in place:**
+- `CompletionBackend` protocol in `base.py`
+- `complete()` method in `lsp_client.py`
+- Activity tracking for idle timeout
 
-**Implementation order:**
-1. Protocol extension (base.py)
-2. LSP client (lsp_client.py)
-3. Hover tool (hover.py)
-4. Document manager (document_manager.py)
-5. Definition tool (definition.py)
-6. Selector update (selector.py)
-7. Integration tests
-
-See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for full plan.
+See [docs/TDD.md](docs/TDD.md) Section 14 for full Phase 3 plan.
 
 ---
 
@@ -114,79 +118,47 @@ See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for full plan.
 
 ```bash
 # Install dependencies
-pip install -e ".[dev]"
+uv sync
 
 # Run server
-python -m pyright_mcp
+uv run python -m pyright_mcp
 
 # Run tests
-pytest tests/ -v
+uv run pytest
 
 # Type check
-pyright src/
+uv run pyright
 
 # Lint
-ruff check src/ tests/
+uv run ruff check .
 ```
 
 ---
 
-## Phase 1 Review (2026-01-22)
+## Phase 2 Review (2026-01-22)
 
-### Code Review Summary
+### PRR Summary
 
-| Category | Found | Resolved |
-|----------|-------|----------|
-| Critical Issues | 4 | 4 ✓ |
-| Recommendations | 8 | 6 ✓ |
-| Architecture Concerns | 4 | 4 ✓ |
+| Category | Status |
+|----------|--------|
+| Security | ✓ No vulnerabilities |
+| Reliability | ✓ Crash recovery, timeouts |
+| Performance | ✓ Lazy init, async I/O |
+| Observability | ✓ Logging, error codes |
+| Testing | ✓ 270 tests, 82% coverage |
 
-### Critical Issues - All Resolved ✓
+**PRR Verdict:** APPROVED
 
-| # | Issue | Resolution |
-|---|-------|------------|
-| 1 | Duplicate condition in `or` expression | Fixed in `5932bdd` |
-| 2 | `_server_start_time` set at import | Changed to lazy init |
-| 3 | `type: ignore` for severity | Replaced with `cast()` |
-| 4 | `type: ignore` for log_mode | Replaced with `cast()` |
+### Key Decisions
 
-### Recommendations Status
+1. **Hybrid backend**: CLI for type checking (publishDiagnostics is async), LSP for hover/definition
+2. **1-indexed API**: User-facing positions match editor display (internal remains 0-indexed)
+3. **Lazy LSP init**: Subprocess only starts on first hover/definition request
+4. **5-minute idle timeout**: Configurable via `PYRIGHT_MCP_LSP_TIMEOUT`
 
-| Priority | Issue | Status |
-|----------|-------|--------|
-| High | Missing tests for `health_check.py` | ✓ Resolved (12 tests) |
-| High | Missing tests for `logging_config.py` | ✓ Resolved (18 tests) |
-| High | Missing tests for `server.py` | ✓ Resolved (14 tests) |
-| Medium | Error codes are strings, not enum | Deferred to Phase 2 |
-| Medium | TOML parsing is regex-based | ✓ Resolved (tomli) |
-| Medium | Double path validation | Deferred (minor) |
-| Low | Hardcoded 5s timeout | Deferred (minor) |
-| Low | Bare `except Exception` | Deferred (minor) |
+### Phase 2 Commits
 
-### Architecture Concerns - All Resolved ✓
-
-| # | Issue | Resolution |
-|---|-------|------------|
-| 1 | TDD/impl mismatch for BackendError | TDD updated in `eb11f9f` |
-| 2 | Protocol only has `check()` | Added `shutdown()` in `90ee4f9` |
-| 3 | Sync I/O in async function | Wrapped with `asyncio.to_thread()` |
-| 4 | No backend selector | Added `backends/selector.py` |
-
-### Phase 2 Readiness - Improved
-
-| Gap | Status |
-|-----|--------|
-| Backend Selection | ✓ `selector.py` with `Backend` protocol |
-| Document Lifecycle | Deferred to Phase 2 |
-| Workspace Awareness | Deferred to Phase 2 |
-| Cancellation | Deferred to Phase 2 |
-
-### Strengths
-
-- Clean module boundaries that will scale to Phase 2
-- Discriminated union responses match TDD specification
-- Position indexing with `from_lsp()`/`to_lsp()` ready for LSP
-- Security-first CLI execution (no shell=True)
-- Explicit logging initialization in `__main__.py`
-- Minimal dependencies (`mcp`, `pyright`, `tomli`)
-- 89% test coverage with comprehensive unit tests
+| Commit | Description |
+|--------|-------------|
+| `6fc92c4` | feat(phase-2): implement LSP-based hover and go_to_definition tools |
+| `44be44a` | refactor(phase-2): extract shared validation and add Phase 3 completion infrastructure |

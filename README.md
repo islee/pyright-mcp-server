@@ -2,7 +2,7 @@
 
 An MCP (Model Context Protocol) server that exposes Pyright's Python static type checking capabilities to LLM clients like Claude.
 
-> **Status:** Phase 1 Complete - CLI-first MVP with `check_types` and `health_check` tools. See [STATUS.md](STATUS.md) for details.
+> **Status:** Phase 2 Complete - LSP IDE features with `get_hover` and `go_to_definition`. See [STATUS.md](STATUS.md) for details.
 
 ## Features
 
@@ -10,9 +10,10 @@ An MCP (Model Context Protocol) server that exposes Pyright's Python static type
 |------|-------------|-------|--------|
 | `check_types` | Run type checking on file/directory | 1 (MVP) | ✓ Implemented |
 | `health_check` | Check server health and Pyright availability | 1 (MVP) | ✓ Implemented |
-| `get_hover` | Get type info and docstring at position | 2 (LSP) | Planned |
-| `go_to_definition` | Find definition location for symbol | 2 (LSP) | Planned |
+| `get_hover` | Get type info and docstring at position | 2 (LSP) | ✓ Implemented |
+| `go_to_definition` | Find definition location for symbol | 2 (LSP) | ✓ Implemented |
 | `get_completions` | Get completion suggestions at position | 3 (Polish) | Planned |
+| `find_references` | Find all references to a symbol | 3 (Polish) | Planned |
 
 ## Installation
 
@@ -95,6 +96,8 @@ go_to_definition("/path/to/file.py", line=10, column=5)
 | `PYRIGHT_MCP_LOG_MODE` | `stderr` | Logging: `stderr`, `file`, or `both` |
 | `PYRIGHT_MCP_LOG_LEVEL` | `INFO` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `PYRIGHT_MCP_ENABLE_HEALTH_CHECK` | `true` | Enable health_check tool |
+| `PYRIGHT_MCP_LSP_TIMEOUT` | `300` | LSP idle timeout (seconds) |
+| `PYRIGHT_MCP_LSP_COMMAND` | `pyright-langserver --stdio` | LSP server command |
 
 ## Development
 

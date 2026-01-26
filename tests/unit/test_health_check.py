@@ -291,3 +291,114 @@ class TestHealthCheck:
         assert result["pyright_version"] == "1.1.400"
         assert result["pyright_available"] is True
         assert "diagnostics" not in result or len(result.get("diagnostics", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_with_pooled_selector(self):
+        """Test health_check() includes pool stats when using PooledSelector."""
+        from pyright_mcp.backends.lsp_pool import LSPPool
+        from pyright_mcp.backends.selector import PooledSelector
+
+        # Create a pooled selector
+        pool = LSPPool(max_instances=2)
+        selector = PooledSelector(pool=pool)
+
+        # Mock subprocess to return valid pyright version
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(b"pyright 1.1.350\n", b"")
+        )
+
+        with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
+            with patch("pyright_mcp.tools.health_check.get_selector", return_value=selector):
+                result = await health_check()
+
+        assert result["status"] == "healthy"
+        assert "lsp_pool" in result
+        assert result["lsp_pool"]["active_instances"] == 0
+        assert result["lsp_pool"]["max_instances"] == 2
+        assert "cache_hit_rate" in result["lsp_pool"]
+        assert "eviction_count" in result["lsp_pool"]
+        assert "workspace_switches" in result["lsp_pool"]
+        assert result["lsp_pool"]["workspaces"] == []
+
+    @pytest.mark.asyncio
+    async def test_health_check_with_metrics(self):
+        """Test health_check() includes metrics summary when using PooledSelector."""
+        from pathlib import Path
+
+        from pyright_mcp.backends.lsp_pool import LSPPool
+        from pyright_mcp.backends.selector import PooledSelector
+        from pyright_mcp.metrics import MetricsCollector
+
+        # Create a pooled selector
+        pool = LSPPool()
+        selector = PooledSelector(pool=pool)
+
+        # Create metrics and record some data
+        metrics_collector = MetricsCollector()
+        await metrics_collector.record(
+            workspace_root=Path("/workspace1"),
+            operation="hover",
+            duration_ms=25.5,
+            success=True,
+        )
+        await metrics_collector.record(
+            workspace_root=Path("/workspace1"),
+            operation="definition",
+            duration_ms=35.2,
+            success=True,
+        )
+
+        # Mock subprocess
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(b"pyright 1.1.350\n", b"")
+        )
+
+        with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
+            with patch("pyright_mcp.tools.health_check.get_selector", return_value=selector):
+                with patch(
+                    "pyright_mcp.tools.health_check.get_metrics_collector",
+                    return_value=metrics_collector,
+                ):
+                    result = await health_check()
+
+        assert result["status"] == "healthy"
+        assert "metrics" in result
+        assert "uptime_seconds" in result["metrics"]
+        assert "workspaces" in result["metrics"]
+        assert len(result["metrics"]["workspaces"]) == 1
+        assert result["metrics"]["workspaces"][0]["workspace"] == "/workspace1"
+        assert result["metrics"]["workspaces"][0]["operations"]["hover"]["count"] == 1
+        assert result["metrics"]["workspaces"][0]["operations"]["definition"]["count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_health_check_pool_stats_content(self):
+        """Test health_check() pool stats include all required fields."""
+        from pyright_mcp.backends.lsp_pool import LSPPool
+        from pyright_mcp.backends.selector import PooledSelector
+
+        # Create a pooled selector
+        pool = LSPPool(max_instances=3)
+        selector = PooledSelector(pool=pool)
+
+        # Mock subprocess
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(b"pyright 1.1.350\n", b"")
+        )
+
+        with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
+            with patch("pyright_mcp.tools.health_check.get_selector", return_value=selector):
+                result = await health_check()
+
+        lsp_pool = result["lsp_pool"]
+        assert isinstance(lsp_pool["active_instances"], int)
+        assert isinstance(lsp_pool["max_instances"], int)
+        assert isinstance(lsp_pool["cache_hit_rate"], float)
+        assert isinstance(lsp_pool["eviction_count"], int)
+        assert isinstance(lsp_pool["workspace_switches"], int)
+        assert isinstance(lsp_pool["workspaces"], list)

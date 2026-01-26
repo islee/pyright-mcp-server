@@ -4,6 +4,7 @@ This module provides the get_hover MCP tool, which returns type information
 and documentation for a symbol at a given position using the Pyright LSP.
 """
 
+import time
 from typing import Any
 
 from ..backends.base import BackendError
@@ -11,6 +12,7 @@ from ..backends.selector import get_selector
 from ..config import get_config
 from ..context.project import detect_project
 from ..logging_config import get_logger
+from ..metrics import get_metrics_collector
 from ..validation import ValidationError, validate_path, validate_position_input
 
 logger = get_logger("tools.hover")
@@ -63,6 +65,10 @@ async def get_hover(
         >>> if result["status"] == "success" and result["type"]:
         ...     print(f"Type: {result['type']}")
     """
+    start_time = time.time()
+    success = False
+    context = None
+
     logger.info(f"get_hover called: file={file}, line={line}, column={column}")
 
     # Step 1: Validate input (convert 1-indexed to 0-indexed)
@@ -104,6 +110,7 @@ async def get_hover(
             column_0,
             project_root=context.root,
         )
+        success = True
         logger.info(
             f"Hover complete: type={result.type_info is not None}, "
             f"doc={result.documentation is not None}"
@@ -124,3 +131,14 @@ async def get_hover(
             "error_code": "execution_error",
             "message": f"Unexpected error during hover: {e}",
         }
+    finally:
+        # Record metrics
+        duration_ms = (time.time() - start_time) * 1000
+        if context:
+            metrics_collector = get_metrics_collector()
+            await metrics_collector.record(
+                workspace_root=context.root,
+                operation="hover",
+                duration_ms=duration_ms,
+                success=success,
+            )

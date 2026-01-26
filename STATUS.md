@@ -1,7 +1,7 @@
 # Project Status
 
 **Last Updated:** 2026-01-26
-**Current Phase:** Phase 2.5 Complete (Hardening)
+**Current Phase:** Phase 3 Complete (Production Features)
 
 For project overview, see [README.md](README.md).
 
@@ -43,6 +43,16 @@ For project overview, see [README.md](README.md).
 - [x] Version compatibility warnings - degraded status for old versions
 - [x] Updated README with version requirements
 
+### Phase 3: Production Features (Complete)
+
+- [x] LSP pool with LRU eviction (ADR-004) - Multi-workspace support
+- [x] Per-workspace metrics collection (ADR-003) - Performance tracking
+- [x] get_completions tool - Code completion suggestions
+- [x] find_references tool - Find all symbol references
+- [x] Enhanced health_check with pool stats and metrics
+- [x] Integration tests for multi-workspace scenarios (15+ tests)
+- [x] Documentation updates (README, STATUS, METRICS.md)
+
 ### Verification Results (Phase 2.5)
 
 | Check | Status |
@@ -61,7 +71,7 @@ For project overview, see [README.md](README.md).
 | **1: MVP** | **Complete** | `check_types`, `health_check` tools via CLI |
 | **2: LSP** | **Complete** | `get_hover`, `go_to_definition` via LSP; CLI stays for `check_types` |
 | **2.5: Hardening** | **Complete** | Automatic LSP timeout, version tracking, defensive logging |
-| **3: Production** | Planned | `get_completions`, `find_references`, LSP pooling, metrics |
+| **3: Production** | **Complete** | `get_completions`, `find_references`, LSP pooling, metrics |
 
 ---
 
@@ -74,6 +84,7 @@ src/pyright_mcp/
 ├── server.py             # FastMCP server setup
 ├── config.py             # Configuration management
 ├── logging_config.py     # Logging infrastructure
+├── metrics.py            # Per-workspace metrics collection
 ├── utils/
 │   ├── position.py       # Position/Range handling
 │   └── uri.py            # Path/URI conversion
@@ -83,43 +94,68 @@ src/pyright_mcp/
 ├── context/
 │   └── project.py        # Project detection
 ├── backends/
-│   ├── base.py           # Backend protocols (Backend, HoverBackend, DefinitionBackend, CompletionBackend)
+│   ├── base.py           # Backend protocols (Backend, HoverBackend, DefinitionBackend, CompletionBackend, ReferencesBackend)
 │   ├── cli_runner.py     # Pyright CLI wrapper
-│   ├── lsp_client.py     # LSP subprocess + JSON-RPC (hover, definition, complete)
+│   ├── lsp_client.py     # LSP subprocess + JSON-RPC (hover, definition, complete, references)
+│   ├── lsp_pool.py       # Multi-workspace LSP pooling with LRU eviction
 │   ├── document_manager.py # LSP document lifecycle
-│   └── selector.py       # HybridSelector (CLI for check, LSP for hover/def)
+│   └── selector.py       # PooledSelector (CLI for check, pooled LSP for IDE features)
 └── tools/
     ├── check_types.py    # check_types MCP tool
-    ├── health_check.py   # health_check MCP tool
-    ├── hover.py          # get_hover MCP tool
-    └── definition.py     # go_to_definition MCP tool
+    ├── health_check.py   # health_check MCP tool (with pool stats and metrics)
+    ├── hover.py          # get_hover MCP tool (with metrics)
+    ├── definition.py     # go_to_definition MCP tool (with metrics)
+    ├── completions.py    # get_completions MCP tool (with metrics)
+    └── references.py     # find_references MCP tool (with metrics)
 
 tests/
 ├── conftest.py           # Shared fixtures
-├── unit/                 # Unit tests (16 files)
-└── integration/          # Integration tests
+├── unit/                 # Unit tests (20+ files)
+└── integration/          # Integration tests (Phase 3 multi-workspace scenarios)
 ```
 
 ---
 
-## Next Phase: Phase 3 (Production Polish)
+## Phase 3 Review (2026-01-26)
 
-**Scope:** Add completions, references, LSP pooling, metrics
+### Implementation Summary
 
-**New tools:**
-- `get_completions` - Code completion suggestions
-- `find_references` - Find all references to symbol
+**Multi-Workspace Support (ADR-004):**
+- LSP pool manages up to 3 concurrent clients per workspace (configurable)
+- LRU eviction prevents unbounded memory growth
+- Cache hit tracking for performance analysis
 
-**New infrastructure:**
-- `backends/lsp_pool.py` - Multi-workspace LSP pooling with LRU eviction
-- `metrics.py` - Performance tracking
+**Per-Workspace Metrics (ADR-003):**
+- Operation counts, latencies, and error rates per workspace
+- Used for performance monitoring and debugging
+- Integrated into health_check response for PooledSelector
 
-**Foundations already in place:**
-- `CompletionBackend` protocol in `base.py`
-- `complete()` method in `lsp_client.py`
-- Activity tracking for idle timeout
+**New Tools:**
+- `get_completions` - Code completion with per-workspace metrics
+- `find_references` - Reference finding with per-workspace metrics
+- Enhanced `health_check` - Now includes pool stats and workspace metrics
 
-See [docs/TDD.md](docs/TDD.md) Section 14 for full Phase 3 plan.
+**Quality Metrics:**
+- Tests: 302+ passing, 15+ integration tests for multi-workspace scenarios
+- Coverage: 75%+
+- All tools record metrics to MetricsCollector
+- Pool statistics visible in health_check response
+
+### Configuration
+
+Environment variables:
+- `PYRIGHT_MCP_LSP_POOL_SIZE` - Maximum LSP clients (default: 3)
+- `PYRIGHT_MCP_LSP_TIMEOUT` - LSP idle timeout in seconds (default: 300)
+
+### Next Steps
+
+Phase 3 is complete. Future enhancements could include:
+- Persistent metrics logging
+- Performance dashboards
+- Advanced pool scheduling strategies
+- Cache hit rate optimization
+
+See [docs/TDD.md](docs/TDD.md) for full technical design.
 
 ---
 

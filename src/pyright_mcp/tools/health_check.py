@@ -8,8 +8,10 @@ import asyncio
 import time
 from typing import Any
 
+from ..backends.selector import PooledSelector, get_selector
 from ..config import get_config
 from ..logging_config import get_logger
+from ..metrics import get_metrics_collector
 
 logger = get_logger("tools.health_check")
 
@@ -245,6 +247,33 @@ async def health_check() -> dict[str, Any]:
         _server_start_time = time.time()
     uptime_seconds = time.time() - _server_start_time
 
+    # Add LSP pool statistics if using PooledSelector (Phase 3)
+    selector = get_selector()
+    if isinstance(selector, PooledSelector):
+        pool_stats = selector._pool.get_pool_stats()
+        response_with_pool: dict[str, Any] = {
+            "status": health_status,
+            "pyright_version": pyright_version,
+            "pyright_available": pyright_available,
+            "config": config_summary,
+            "uptime_seconds": round(uptime_seconds, 2),
+            "lsp_pool": pool_stats,
+        }
+        if diagnostics:
+            response_with_pool["diagnostics"] = diagnostics
+
+        # Add metrics summary
+        metrics_collector = get_metrics_collector()
+        all_metrics = metrics_collector.get_all_metrics()
+        response_with_pool["metrics"] = {
+            "uptime_seconds": round(metrics_collector.uptime_seconds(), 2),
+            "workspaces": [m.to_dict() for m in all_metrics],
+        }
+
+        logger.info("Health check completed (with pool stats and metrics)")
+        return response_with_pool
+
+    # Standard response without pool stats (Phase 1-2)
     logger.info("Health check completed")
     response: dict[str, Any] = {
         "status": health_status,

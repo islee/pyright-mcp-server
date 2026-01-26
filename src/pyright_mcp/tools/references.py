@@ -7,22 +7,10 @@ from typing import Any
 from ..backends.selector import get_selector
 from ..context.project import detect_project
 from ..logging_config import get_logger
+from ..metrics import get_metrics_collector
 from ..validation.inputs import validate_position_input
 
 logger = get_logger("tools.references")
-
-# Global metrics collector (set by server)
-_metrics_collector: Any = None
-
-
-def set_metrics_collector(collector: Any) -> None:
-    """Set global metrics collector.
-
-    Args:
-        collector: MetricsCollector instance
-    """
-    global _metrics_collector
-    _metrics_collector = collector
 
 
 async def find_references(
@@ -97,8 +85,9 @@ async def find_references(
     finally:
         # Record metrics
         duration_ms = (time.time() - start_time) * 1000
-        if context and _metrics_collector:
-            await _metrics_collector.record(
+        if context:
+            metrics_collector = get_metrics_collector()
+            await metrics_collector.record(
                 workspace_root=context.root,
                 operation="references",
                 duration_ms=duration_ms,

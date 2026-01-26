@@ -112,6 +112,30 @@ class MetricsCollector:
         self._start_time = time.time()
         self._lock = asyncio.Lock()
 
+
+# Global metrics collector singleton
+_metrics_collector: MetricsCollector | None = None
+
+
+def get_metrics_collector() -> MetricsCollector:
+    """Get the global metrics collector singleton.
+
+    Creates a new instance on first call, returns the same instance thereafter.
+
+    Returns:
+        MetricsCollector instance
+    """
+    global _metrics_collector
+    if _metrics_collector is None:
+        _metrics_collector = MetricsCollector()
+    return _metrics_collector
+
+
+def reset_metrics_collector() -> None:
+    """Reset the global metrics collector (for testing only)."""
+    global _metrics_collector
+    _metrics_collector = None
+
     async def record(
         self,
         workspace_root: Path,

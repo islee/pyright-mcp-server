@@ -4,6 +4,7 @@ This module provides the go_to_definition MCP tool, which finds the definition
 location(s) for a symbol at a given position using the Pyright LSP.
 """
 
+import time
 from typing import Any
 
 from ..backends.base import BackendError
@@ -11,6 +12,7 @@ from ..backends.selector import get_selector
 from ..config import get_config
 from ..context.project import detect_project
 from ..logging_config import get_logger
+from ..metrics import get_metrics_collector
 from ..validation import ValidationError, validate_path, validate_position_input
 
 logger = get_logger("tools.definition")
@@ -66,6 +68,10 @@ async def go_to_definition(
         ...     defn = result["definitions"][0]
         ...     print(f"Defined at {defn['file']}:{defn['line']}")
     """
+    start_time = time.time()
+    success = False
+    context = None
+
     logger.info(f"go_to_definition called: file={file}, line={line}, column={column}")
 
     # Step 1: Validate input (convert 1-indexed to 0-indexed)
@@ -107,6 +113,7 @@ async def go_to_definition(
             column_0,
             project_root=context.root,
         )
+        success = True
         logger.info(f"Definition complete: {len(result.definitions)} location(s) found")
         return result.to_dict()
 
@@ -124,3 +131,14 @@ async def go_to_definition(
             "error_code": "execution_error",
             "message": f"Unexpected error during definition: {e}",
         }
+    finally:
+        # Record metrics
+        duration_ms = (time.time() - start_time) * 1000
+        if context:
+            metrics_collector = get_metrics_collector()
+            await metrics_collector.record(
+                workspace_root=context.root,
+                operation="definition",
+                duration_ms=duration_ms,
+                success=success,
+            )

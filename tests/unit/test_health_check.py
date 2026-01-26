@@ -42,11 +42,12 @@ class TestHealthCheck:
         with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await health_check()
 
-        assert result["status"] == "success"
+        assert result["status"] == "healthy"
         assert result["pyright_version"] == "1.1.350"
         assert result["pyright_available"] is True
         assert "config" in result
         assert "uptime_seconds" in result
+        assert "diagnostics" not in result  # No diagnostics when version is compatible
 
     @pytest.mark.asyncio
     async def test_health_check_pyright_not_found(self):
@@ -113,7 +114,7 @@ class TestHealthCheck:
         with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await health_check()
 
-        assert result["status"] == "success"
+        assert result["status"] == "healthy"
         config_summary = result["config"]
 
         # Verify config fields are present
@@ -187,7 +188,7 @@ class TestHealthCheck:
         with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await health_check()
 
-        assert result["status"] == "success"
+        assert result["status"] == "healthy"
         # Should use the whole stdout as version
         assert result["pyright_version"] == "1.1.350"
 
@@ -204,7 +205,7 @@ class TestHealthCheck:
         with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await health_check()
 
-        assert result["status"] == "success"
+        assert result["status"] == "healthy"
         assert result["pyright_version"] == "1.1.350"
 
     @pytest.mark.asyncio
@@ -220,7 +221,7 @@ class TestHealthCheck:
         with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await health_check()
 
-        assert result["status"] == "success"
+        assert result["status"] == "healthy"
         assert result["pyright_version"] == "1.1.350"
 
     @pytest.mark.asyncio
@@ -236,7 +237,7 @@ class TestHealthCheck:
         with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await health_check()
 
-        assert result["status"] == "success"
+        assert result["status"] == "healthy"
         assert result["pyright_version"] == "1.1.350-beta.1"
 
     @pytest.mark.asyncio
@@ -251,3 +252,42 @@ class TestHealthCheck:
         assert result["status"] == "error"
         assert result["error_code"] == "execution_error"
         assert "unexpected error" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_health_check_warns_incompatible_version(self):
+        """Test health_check() returns degraded status for old Pyright version."""
+        # Mock subprocess to return old pyright version
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(b"pyright 1.1.100\n", b"")
+        )
+
+        with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await health_check()
+
+        assert result["status"] == "degraded"
+        assert result["pyright_version"] == "1.1.100"
+        assert result["pyright_available"] is True
+        assert "diagnostics" in result
+        assert len(result["diagnostics"]) == 1
+        assert "1.1.100" in result["diagnostics"][0]
+        assert "1.1.350+" in result["diagnostics"][0]
+
+    @pytest.mark.asyncio
+    async def test_health_check_compatible_newer_version(self):
+        """Test health_check() returns healthy status for newer compatible version."""
+        # Mock subprocess to return newer pyright version
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(
+            return_value=(b"pyright 1.1.400\n", b"")
+        )
+
+        with patch("pyright_mcp.tools.health_check.asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await health_check()
+
+        assert result["status"] == "healthy"
+        assert result["pyright_version"] == "1.1.400"
+        assert result["pyright_available"] is True
+        assert "diagnostics" not in result or len(result.get("diagnostics", [])) == 0

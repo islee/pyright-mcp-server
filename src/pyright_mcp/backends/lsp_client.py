@@ -98,6 +98,7 @@ class LSPClient:
         self._documents = DocumentManager()
         self._pending_requests: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: asyncio.Task[None] | None = None
+        self._watcher_task: asyncio.Task[None] | None = None
 
     @property
     def state(self) -> LSPState:
@@ -203,6 +204,9 @@ class LSPClient:
 
             self._state = LSPState.READY
             logger.info(f"LSP server ready for workspace: {workspace_root}")
+
+            # Start background watcher task for idle timeout enforcement
+            self._watcher_task = asyncio.create_task(self._idle_timeout_watcher())
 
         except FileNotFoundError as e:
             self._state = LSPState.NOT_STARTED
@@ -478,8 +482,46 @@ class LSPClient:
         finally:
             await self._cleanup()
 
+    async def _idle_timeout_watcher(self) -> None:
+        """Background task to enforce automatic LSP idle timeout.
+
+        Runs continuously while LSP is READY and checks every 60 seconds
+        if the idle timeout has been exceeded. If so, shuts down the LSP server.
+        Stops cleanly when LSP shuts down or crashes.
+        """
+        try:
+            while self._state == LSPState.READY:
+                await asyncio.sleep(60)
+
+                # Check if timeout is exceeded
+                if self._state != LSPState.READY or not self._process:
+                    break
+
+                idle_time = time.time() - self._process.last_activity
+                if idle_time >= self.config.lsp_timeout:
+                    logger.info(
+                        f"LSP idle timeout ({idle_time:.1f}s >= {self.config.lsp_timeout}s), "
+                        "shutting down automatically"
+                    )
+                    async with self._lock:
+                        if self._state == LSPState.READY:
+                            await self._shutdown_internal()
+                    break
+
+        except asyncio.CancelledError:
+            logger.debug("LSP idle timeout watcher cancelled")
+        except Exception as e:
+            logger.error(f"Error in LSP idle timeout watcher: {e}", exc_info=True)
+
     async def _cleanup(self) -> None:
         """Clean up subprocess and state."""
+        # Cancel watcher task
+        if self._watcher_task:
+            self._watcher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watcher_task
+            self._watcher_task = None
+
         # Cancel reader task
         if self._reader_task:
             self._reader_task.cancel()

@@ -85,6 +85,7 @@ go_to_definition("/path/to/file.py", line=10, column=5)
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- Pyright 1.1.350+ (tested with 1.1.350-1.1.408). Run `health_check` to verify compatibility.
 - Node.js (for Pyright, installed automatically via pyright package)
 
 ## Environment Variables

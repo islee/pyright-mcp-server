@@ -323,3 +323,75 @@ class TestLSPClientIdleTimeout:
 
         result = await client.check_idle_timeout()
         assert result is False
+
+
+class TestLSPClientIdleTimeoutWatcher:
+    """Tests for LSP idle timeout watcher task."""
+
+    def test_watcher_task_field_initialized(self):
+        """Test that watcher task field is initialized to None."""
+        client = LSPClient()
+        assert client._watcher_task is None
+
+    @pytest.mark.asyncio
+    async def test_watcher_stops_on_cleanup(self):
+        """Test that watcher task is cancelled during cleanup."""
+        import time
+
+        config = Config(
+            allowed_paths=None,
+            cli_timeout=30.0,
+            lsp_timeout=1.0,
+            lsp_command=["pyright-langserver", "--stdio"],
+            log_level="INFO",
+            log_mode="stderr",
+            log_file=None,
+            enable_health_check=True,
+        )
+        client = LSPClient(config)
+
+        # Set up LSP in READY state
+        client._state = LSPState.READY
+        mock_proc = AsyncMock()
+        mock_proc.returncode = None
+        mock_proc.wait = AsyncMock()
+        mock_proc.kill = MagicMock()
+
+        mock_process = MagicMock()
+        mock_process.process = mock_proc
+        mock_process.last_activity = time.time()
+        client._process = mock_process
+
+        # Start the watcher manually
+        client._watcher_task = asyncio.create_task(client._idle_timeout_watcher())
+        await asyncio.sleep(0.01)  # Let it start
+
+        # Verify watcher task exists
+        assert client._watcher_task is not None
+
+        # Call cleanup (which should cancel watcher)
+        await client._cleanup()
+
+        # Watcher should be None after cleanup
+        assert client._watcher_task is None
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_watcher_respects_state(self):
+        """Test that idle timeout watcher stops when state is not READY."""
+        import time
+
+        client = LSPClient()
+
+        # Create mock process
+        mock_process = MagicMock()
+        mock_process.last_activity = time.time()
+        client._process = mock_process
+
+        # Set state to NOT_STARTED (should cause watcher to exit immediately)
+        client._state = LSPState.NOT_STARTED
+
+        # Run watcher (should exit immediately)
+        await client._idle_timeout_watcher()
+
+        # If we get here without hanging, test passes
+        assert True

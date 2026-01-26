@@ -12,12 +12,35 @@ Phase 2 Tools:
 - go_to_definition: Find definition locations via LSP
 """
 
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+
+def create_mcp_server() -> FastMCP:
+    """Create and initialize the MCP server instance.
+
+    Includes defensive logging initialization to prevent duplicate handlers
+    when server is created multiple times (e.g., in tests).
+
+    Returns:
+        FastMCP server instance
+    """
+    # Defensive logging initialization
+    root_logger = logging.getLogger()
+    if not root_logger.hasHandlers():
+        from .config import get_config
+        from .logging_config import setup_logging
+
+        config = get_config()
+        setup_logging(config)
+
+    return FastMCP("pyright-mcp")
+
+
 # Create server instance
-mcp = FastMCP("pyright-mcp")
+mcp = create_mcp_server()
 
 
 @mcp.tool()

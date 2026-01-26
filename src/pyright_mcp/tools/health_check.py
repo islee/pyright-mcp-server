@@ -16,54 +16,64 @@ logger = get_logger("tools.health_check")
 # Track server start time (lazy initialization)
 _server_start_time: float | None = None
 
+# Minimum Pyright version requirement
+MINIMUM_PYRIGHT_VERSION = "1.1.350"
 
-async def health_check() -> dict[str, Any]:
-    """
-    Check server health and verify Pyright is available.
 
-    Verifies that:
-    - Pyright CLI is installed and accessible
-    - Server configuration is valid
-    - Runtime is healthy
+def _parse_version(version_str: str) -> tuple[int, int, int] | None:
+    """Parse version string like '1.1.350' or '1.1.350-beta.1' into (major, minor, patch) tuple.
+
+    Args:
+        version_str: Version string (e.g., "1.1.350" or "1.1.350-beta.1")
 
     Returns:
-        Success:
-            {
-                "status": "success",
-                "pyright_version": "1.1.350",
-                "pyright_available": true,
-                "config": {
-                    "log_level": "INFO",
-                    "log_mode": "stderr",
-                    "cli_timeout": 30.0,
-                    "allowed_paths_count": 1,
-                    "enable_health_check": true
-                },
-                "uptime_seconds": 123.45
-            }
-
-        Error:
-            {
-                "status": "error",
-                "error_code": "not_found" | "execution_error",
-                "message": "Human-readable error message"
-            }
-
-    Example:
-        >>> result = await health_check()
-        >>> if result["status"] == "success":
-        ...     print(f"Pyright {result['pyright_version']} is available")
+        Tuple of (major, minor, patch) or None if parsing fails
     """
-    logger.info("health_check called")
-
-    config = get_config()
-
-    # Check if Pyright is available by running --version
-    pyright_version = None
-    pyright_available = False
-
     try:
-        logger.debug("Checking Pyright availability: pyright --version")
+        # Remove prerelease suffix (e.g., "-beta.1")
+        version_only = version_str.split("-")[0]
+        parts = version_only.split(".")
+        if len(parts) < 3:
+            return None
+        major = int(parts[0])
+        minor = int(parts[1])
+        patch = int(parts[2])
+        return (major, minor, patch)
+    except (ValueError, IndexError, AttributeError):
+        return None
+
+
+def _is_version_compatible(version: str | None) -> bool:
+    """Check if Pyright version is compatible (>= minimum required).
+
+    Args:
+        version: Version string (e.g., "1.1.350")
+
+    Returns:
+        True if version is >= MINIMUM_PYRIGHT_VERSION, False otherwise
+    """
+    if not version:
+        return False
+
+    version_tuple = _parse_version(version)
+    min_version_tuple = _parse_version(MINIMUM_PYRIGHT_VERSION)
+
+    if not version_tuple or not min_version_tuple:
+        return False
+
+    return version_tuple >= min_version_tuple
+
+
+async def _get_pyright_version() -> tuple[str | None, str | None, str | None]:
+    """Get installed Pyright version by running 'pyright --version'.
+
+    Returns:
+        Tuple of (version_string, error_code, error_message) where:
+        - version_string is the parsed version (e.g., "1.1.350") or None
+        - error_code is one of: None (success), "timeout", "not_found", "execution_error"
+        - error_message is the error detail if error_code is not None
+    """
+    try:
         proc = await asyncio.create_subprocess_exec(
             "pyright",
             "--version",
@@ -79,46 +89,128 @@ async def health_check() -> dict[str, Any]:
             stderr = stderr_bytes.decode("utf-8").strip()
 
             if proc.returncode == 0:
-                pyright_available = True
                 # Parse version from output (e.g., "pyright 1.1.350")
-                # Output format: "pyright X.Y.Z"
                 if stdout.startswith("pyright"):
-                    pyright_version = stdout.split()[1] if len(stdout.split()) > 1 else stdout
-                else:
-                    pyright_version = stdout
+                    parts = stdout.split()
+                    if len(parts) > 1:
+                        return (parts[1], None, None)
+                return (stdout, None, None)
 
-                logger.info(f"Pyright is available: {pyright_version}")
-            else:
-                logger.warning(
-                    f"Pyright returned non-zero exit code: {proc.returncode}. "
-                    f"stdout: {stdout}, stderr: {stderr}"
-                )
-                return {
-                    "status": "error",
-                    "error_code": "execution_error",
-                    "message": f"Pyright command failed: {stderr or stdout}",
-                }
+            # Non-zero exit code
+            return (None, "execution_error", stderr or stdout)
 
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+            return (None, "timeout", "Pyright --version command timed out after 5s")
+
+    except FileNotFoundError:
+        return (None, "not_found", "Pyright executable not found")
+    except Exception as e:
+        logger.debug(f"Error getting Pyright version: {e}")
+        return (None, "execution_error", str(e))
+
+
+async def health_check() -> dict[str, Any]:
+    """
+    Check server health and verify Pyright is available.
+
+    Verifies that:
+    - Pyright CLI is installed and accessible
+    - Pyright version is compatible (>= 1.1.350)
+    - Server configuration is valid
+    - Runtime is healthy
+
+    Returns:
+        Success:
+            {
+                "status": "healthy",
+                "pyright_version": "1.1.350",
+                "pyright_available": true,
+                "config": {
+                    "log_level": "INFO",
+                    "log_mode": "stderr",
+                    "cli_timeout": 30.0,
+                    "allowed_paths_count": 1,
+                    "enable_health_check": true
+                },
+                "uptime_seconds": 123.45
+            }
+
+        Degraded (version incompatible):
+            {
+                "status": "degraded",
+                "pyright_version": "1.1.100",
+                "pyright_available": true,
+                "diagnostics": ["Pyright version 1.1.100 may be incompatible. Tested with 1.1.350+"],
+                "config": {...},
+                "uptime_seconds": 123.45
+            }
+
+        Error:
+            {
+                "status": "error",
+                "error_code": "not_found" | "execution_error",
+                "message": "Human-readable error message"
+            }
+
+    Example:
+        >>> result = await health_check()
+        >>> if result["status"] == "healthy":
+        ...     print(f"Pyright {result['pyright_version']} is available")
+    """
+    logger.info("health_check called")
+
+    config = get_config()
+
+    # Check if Pyright is available
+    pyright_version = None
+    pyright_available = False
+
+    try:
+        logger.debug("Checking Pyright availability: pyright --version")
+        pyright_version, error_code, error_message = await _get_pyright_version()
+
+        # Handle errors from version check
+        if error_code == "timeout":
             logger.error("Pyright --version command timed out")
             return {
                 "status": "error",
                 "error_code": "timeout",
-                "message": "Pyright --version command timed out after 5s",
+                "message": error_message or "Pyright --version command timed out after 5s",
+            }
+        if error_code == "not_found":
+            logger.error("Pyright executable not found")
+            return {
+                "status": "error",
+                "error_code": "not_found",
+                "message": (
+                    "Pyright executable not found. Please install it: "
+                    "pip install pyright"
+                ),
+            }
+        if error_code == "execution_error":
+            logger.error(f"Pyright command failed: {error_message}")
+            return {
+                "status": "error",
+                "error_code": "execution_error",
+                "message": f"Pyright command failed: {error_message}",
             }
 
-    except FileNotFoundError:
-        logger.error("Pyright executable not found")
-        return {
-            "status": "error",
-            "error_code": "not_found",
-            "message": (
-                "Pyright executable not found. Please install it: "
-                "pip install pyright"
-            ),
-        }
+        if pyright_version:
+            pyright_available = True
+            logger.info(f"Pyright is available: {pyright_version}")
+        else:
+            logger.error("Pyright executable not found")
+            return {
+                "status": "error",
+                "error_code": "not_found",
+                "message": (
+                    "Pyright executable not found. Please install it: "
+                    "pip install pyright"
+                ),
+            }
+
     except Exception as e:
         logger.error(f"Unexpected error checking Pyright availability: {e}", exc_info=True)
         return {
@@ -126,6 +218,16 @@ async def health_check() -> dict[str, Any]:
             "error_code": "execution_error",
             "message": f"Failed to check Pyright availability: {e}",
         }
+
+    # Check version compatibility
+    is_compatible = _is_version_compatible(pyright_version)
+    health_status = "healthy" if is_compatible else "degraded"
+    diagnostics: list[str] = []
+
+    if not is_compatible:
+        msg = f"Pyright version {pyright_version} may be incompatible. Tested with {MINIMUM_PYRIGHT_VERSION}+"
+        diagnostics.append(msg)
+        logger.warning(msg)
 
     # Build config summary (sanitize sensitive data)
     allowed_paths_count = len(config.allowed_paths) if config.allowed_paths else 0
@@ -143,11 +245,16 @@ async def health_check() -> dict[str, Any]:
         _server_start_time = time.time()
     uptime_seconds = time.time() - _server_start_time
 
-    logger.info("Health check successful")
-    return {
-        "status": "success",
+    logger.info("Health check completed")
+    response: dict[str, Any] = {
+        "status": health_status,
         "pyright_version": pyright_version,
         "pyright_available": pyright_available,
         "config": config_summary,
         "uptime_seconds": round(uptime_seconds, 2),
     }
+
+    if diagnostics:
+        response["diagnostics"] = diagnostics
+
+    return response

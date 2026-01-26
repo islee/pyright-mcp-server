@@ -358,3 +358,55 @@ class TestHealthCheckTool:
             # Verify implementation was called (not disabled)
             mock_impl.assert_called_once()
             assert result["status"] == "success"
+
+
+class TestDefensiveLoggingInitialization:
+    """Tests for defensive logging initialization in server creation."""
+
+    def test_multiple_server_creation_no_duplicate_handlers(self):
+        """Test that creating multiple servers doesn't register duplicate logging handlers."""
+        import logging
+
+        from pyright_mcp.server import create_mcp_server
+
+        # Reset logging to clean state
+        root_logger = logging.getLogger()
+        initial_handler_count = len(root_logger.handlers)
+
+        # Create first server
+        server1 = create_mcp_server()
+        handler_count_after_first = len(root_logger.handlers)
+
+        # Create second server
+        server2 = create_mcp_server()
+        handler_count_after_second = len(root_logger.handlers)
+
+        # Handler count should be the same after second server creation
+        # (defensive logging check prevents duplicates)
+        assert handler_count_after_second == handler_count_after_first
+        assert server1 is not None
+        assert server2 is not None
+
+    def test_server_creation_defensively_initializes_logging(self):
+        """Test that server creation defensively checks if logging is initialized."""
+        import logging
+
+        from pyright_mcp.server import create_mcp_server
+
+        # Get initial handler count
+        root_logger = logging.getLogger()
+        initial_count = len(root_logger.handlers)
+
+        # Create first server
+        server1 = create_mcp_server()
+        count_after_first = len(root_logger.handlers)
+
+        # Create second server
+        server2 = create_mcp_server()
+        count_after_second = len(root_logger.handlers)
+
+        # Handler count should not increase after second server creation
+        # (defensive logging prevents duplicate handlers)
+        assert count_after_second <= count_after_first
+        assert server1 is not None
+        assert server2 is not None

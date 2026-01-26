@@ -36,6 +36,7 @@ from .base import (
     DefinitionResult,
     HoverResult,
     Location,
+    ReferencesResult,
 )
 from .document_manager import DocumentManager
 
@@ -443,6 +444,76 @@ class LSPClient:
                 raise BackendError(
                     error_code="lsp_crash",
                     message=f"Completion request failed: {e}",
+                    recoverable=True,
+                ) from e
+
+    async def references(
+        self,
+        file: Path,
+        line: int,
+        column: int,
+        *,
+        project_root: Path | None = None,
+        include_declaration: bool = True,
+    ) -> "ReferencesResult":
+        """Find all references to symbol at a position.
+
+        Args:
+            file: Path to the file
+            line: 0-indexed line number
+            column: 0-indexed column number
+            project_root: Optional project root (uses file's parent if not specified)
+            include_declaration: Include declaration in results (default True)
+
+        Returns:
+            ReferencesResult with list of reference locations
+
+        Raises:
+            BackendError: If operation fails
+        """
+        # Determine workspace root
+        workspace = project_root or file.parent
+
+        # Ensure LSP is ready
+        await self.ensure_initialized(workspace)
+
+        async with self._lock:
+            if self._state != LSPState.READY:
+                raise BackendError(
+                    error_code="lsp_not_ready",
+                    message="LSP server is not ready",
+                    recoverable=True,
+                )
+
+            # Update activity timestamp for idle timeout tracking
+            if self._process:
+                self._process.last_activity = time.time()
+
+            try:
+                # Ensure document is open
+                await self._documents.ensure_open(self, file)
+
+                # Send references request
+                uri = path_to_uri(file)
+                params: dict[str, Any] = {
+                    "textDocument": {"uri": uri},
+                    "position": {"line": line, "character": column},
+                    "context": {"includeDeclaration": include_declaration},
+                }
+
+                result = await self._send_request("textDocument/references", params)
+
+                # Parse response
+                return self._parse_references_response(result)
+
+            except BackendError:
+                raise
+            except Exception as e:
+                logger.error(f"References request failed: {e}", exc_info=True)
+                await self._handle_error(e)
+                raise BackendError(
+                    error_code="lsp_crash",
+                    message=f"References request failed: {e}",
                     recoverable=True,
                 ) from e
 
@@ -962,6 +1033,45 @@ class LSPClient:
         except Exception as e:
             logger.warning(f"Failed to parse completion item: {e}")
             return None
+
+    def _parse_references_response(
+        self, result: list[dict[str, Any]] | None
+    ) -> ReferencesResult:
+        """Parse LSP references response into ReferencesResult.
+
+        Args:
+            result: LSP references response (Location[])
+
+        Returns:
+            ReferencesResult with parsed reference locations
+        """
+        if result is None or not isinstance(result, list):
+            return ReferencesResult(references=[])
+
+        references: list[Location] = []
+        for ref_data in result:
+            try:
+                # Parse location from LSP format
+                uri = ref_data.get("uri")
+                if not uri:
+                    continue
+
+                # Convert URI back to path
+                file_path = uri_to_path(uri)
+                range_data = ref_data.get("range", {})
+                start_pos = range_data.get("start", {})
+
+                line = start_pos.get("line", 0)
+                column = start_pos.get("character", 0)
+
+                location = Location(file=file_path, position=Position(line=line, column=column))
+                references.append(location)
+
+            except Exception as e:
+                logger.warning(f"Failed to parse reference location: {e}")
+                continue
+
+        return ReferencesResult(references=references)
 
     async def check_idle_timeout(self) -> bool:
         """Check if LSP should be shut down due to idle timeout.

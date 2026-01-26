@@ -168,3 +168,86 @@ async def go_to_definition(
     from .tools.definition import go_to_definition as go_to_definition_impl
 
     return await go_to_definition_impl(file, line, column)
+
+
+# ============================================================================
+# Phase 3: Additional LSP-based tools for completions and references
+# ============================================================================
+
+
+@mcp.tool()
+async def get_completions(
+    file: str,
+    line: int,
+    column: int,
+    trigger_character: str | None = None,
+) -> dict[str, Any]:
+    """
+    Get code completion suggestions at a position.
+
+    Use this tool to get intelligent code completions based on context.
+    Returns a list of completion items with their types and documentation.
+
+    Args:
+        file: Absolute path to the Python file
+        line: Line number (1-indexed, first line is 1)
+        column: Column number (1-indexed, first column is 1)
+        trigger_character: Optional trigger character that triggered completion (e.g., ".", "(")
+
+    Returns:
+        Dictionary with status field indicating success or error.
+        Success includes items array with completion suggestions.
+        Each item has label, kind, detail, and documentation.
+        Error includes error_code and message.
+
+    Example:
+        For "import os; os." with cursor after ".":
+        - items: [
+            {"label": "getcwd", "kind": "function", "detail": "() -> str"},
+            {"label": "listdir", "kind": "function", "detail": "(path) -> list[str]"}
+          ]
+    """
+    # Lazy import to avoid circular dependencies
+    from .tools.completions import get_completions as get_completions_impl
+
+    return await get_completions_impl(file, line, column, trigger_character)
+
+
+@mcp.tool()
+async def find_references(
+    file: str,
+    line: int,
+    column: int,
+    include_declaration: bool = True,
+) -> dict[str, Any]:
+    """
+    Find all references to a symbol at a position.
+
+    Use this tool to find all places where a symbol (variable, function, class, etc.)
+    is referenced in the codebase. Returns file paths and positions of all references.
+
+    Args:
+        file: Absolute path to the Python file
+        line: Line number (1-indexed, first line is 1)
+        column: Column number (1-indexed, first column is 1)
+        include_declaration: Whether to include the declaration in results (default True)
+
+    Returns:
+        Dictionary with status field indicating success or error.
+        Success includes references array with all reference locations.
+        Each reference has file, line, and column (1-indexed).
+        Also includes count of total references.
+        Error includes error_code and message.
+
+    Example:
+        For finding all references to a function `my_func`:
+        - references: [
+            {"file": "/path/file1.py", "line": 10, "column": 5},
+            {"file": "/path/file2.py", "line": 25, "column": 12}
+          ]
+        - count: 2
+    """
+    # Lazy import to avoid circular dependencies
+    from .tools.references import find_references as find_references_impl
+
+    return await find_references_impl(file, line, column, include_declaration)

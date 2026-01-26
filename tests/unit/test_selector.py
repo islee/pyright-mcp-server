@@ -9,6 +9,7 @@ from pyright_mcp.backends.cli_runner import PyrightCLIRunner
 from pyright_mcp.backends.selector import (
     CLIOnlySelector,
     HybridSelector,
+    PooledSelector,
     get_selector,
     reset_selector,
 )
@@ -43,6 +44,20 @@ class TestCLIOnlySelector:
         selector = CLIOnlySelector()
         with pytest.raises(NotImplementedError):
             await selector.get_definition_backend(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_cli_only_selector_get_completion_backend_raises(self, tmp_path: Path):
+        """Test get_completion_backend raises NotImplementedError."""
+        selector = CLIOnlySelector()
+        with pytest.raises(NotImplementedError):
+            await selector.get_completion_backend(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_cli_only_selector_get_references_backend_raises(self, tmp_path: Path):
+        """Test get_references_backend raises NotImplementedError."""
+        selector = CLIOnlySelector()
+        with pytest.raises(NotImplementedError):
+            await selector.get_references_backend(tmp_path)
 
     @pytest.mark.asyncio
     async def test_cli_only_selector_shutdown_all(self):
@@ -127,6 +142,20 @@ class TestHybridSelector:
         assert selector._lsp is None
 
     @pytest.mark.asyncio
+    async def test_hybrid_selector_get_completion_backend(self, tmp_path: Path):
+        """Test get_completion_backend returns LSP client."""
+        selector = HybridSelector()
+        backend = await selector.get_completion_backend(tmp_path)
+        assert backend is not None
+
+    @pytest.mark.asyncio
+    async def test_hybrid_selector_get_references_backend(self, tmp_path: Path):
+        """Test get_references_backend returns LSP client."""
+        selector = HybridSelector()
+        backend = await selector.get_references_backend(tmp_path)
+        assert backend is not None
+
+    @pytest.mark.asyncio
     async def test_hybrid_selector_shutdown_all_without_lsp(self):
         """Test shutdown_all is safe when LSP not initialized."""
         selector = HybridSelector()
@@ -157,3 +186,62 @@ class TestGetSelector:
         reset_selector()
         selector2 = get_selector()
         assert selector1 is not selector2
+
+
+class TestPooledSelector:
+    """Tests for PooledSelector (Phase 3)."""
+
+    def test_pooled_selector_initialization(self):
+        """Test PooledSelector creates CLI and pool."""
+        selector = PooledSelector()
+        assert hasattr(selector, "_cli")
+        assert isinstance(selector._cli, PyrightCLIRunner)
+        assert hasattr(selector, "_pool")
+
+    @pytest.mark.asyncio
+    async def test_pooled_selector_get_backend(self, tmp_path: Path):
+        """Test get_backend returns CLI backend."""
+        selector = PooledSelector()
+        backend = await selector.get_backend(tmp_path)
+        assert isinstance(backend, PyrightCLIRunner)
+
+    @pytest.mark.asyncio
+    async def test_pooled_selector_get_hover_backend(self, tmp_path: Path):
+        """Test get_hover_backend returns pooled LSP client."""
+        selector = PooledSelector()
+        backend = await selector.get_hover_backend(tmp_path)
+        assert backend is not None
+
+    @pytest.mark.asyncio
+    async def test_pooled_selector_get_definition_backend(self, tmp_path: Path):
+        """Test get_definition_backend returns pooled LSP client."""
+        selector = PooledSelector()
+        backend = await selector.get_definition_backend(tmp_path)
+        assert backend is not None
+
+    @pytest.mark.asyncio
+    async def test_pooled_selector_get_completion_backend(self, tmp_path: Path):
+        """Test get_completion_backend returns pooled LSP client."""
+        selector = PooledSelector()
+        backend = await selector.get_completion_backend(tmp_path)
+        assert backend is not None
+
+    @pytest.mark.asyncio
+    async def test_pooled_selector_get_references_backend(self, tmp_path: Path):
+        """Test get_references_backend returns pooled LSP client."""
+        selector = PooledSelector()
+        backend = await selector.get_references_backend(tmp_path)
+        assert backend is not None
+
+    @pytest.mark.asyncio
+    async def test_pooled_selector_shutdown(self):
+        """Test shutdown_all closes pool."""
+        selector = PooledSelector()
+
+        # Save pool reference
+        pool = selector._pool
+        pool.shutdown_all = AsyncMock()
+
+        await selector.shutdown_all()
+
+        pool.shutdown_all.assert_called_once()

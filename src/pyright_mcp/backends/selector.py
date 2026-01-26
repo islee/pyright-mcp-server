@@ -2,12 +2,13 @@
 
 Phase 1: CLI-only selector for type checking
 Phase 2: Hybrid selector with CLI for type checking, LSP for hover/definition
+Phase 3: Pooled selector with multi-workspace LSP pooling
 """
 
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .base import Backend, DefinitionBackend, HoverBackend
+from .base import Backend, CompletionBackend, DefinitionBackend, HoverBackend, ReferencesBackend
 
 
 class BackendSelector(ABC):
@@ -53,6 +54,32 @@ class BackendSelector(ABC):
         ...
 
     @abstractmethod
+    async def get_completion_backend(self, path: Path) -> CompletionBackend:
+        """
+        Get backend for completion operations.
+
+        Args:
+            path: File being analyzed
+
+        Returns:
+            CompletionBackend instance
+        """
+        ...
+
+    @abstractmethod
+    async def get_references_backend(self, path: Path) -> ReferencesBackend:
+        """
+        Get backend for references operations.
+
+        Args:
+            path: File being analyzed
+
+        Returns:
+            ReferencesBackend instance
+        """
+        ...
+
+    @abstractmethod
     async def shutdown_all(self) -> None:
         """Shutdown all managed backends."""
         ...
@@ -90,6 +117,14 @@ class CLIOnlySelector(BackendSelector):
     async def get_definition_backend(self, path: Path) -> DefinitionBackend:
         """Not available in CLI-only mode."""
         raise NotImplementedError("Definition not available in CLI-only mode")
+
+    async def get_completion_backend(self, path: Path) -> CompletionBackend:
+        """Not available in CLI-only mode."""
+        raise NotImplementedError("Completion not available in CLI-only mode")
+
+    async def get_references_backend(self, path: Path) -> ReferencesBackend:
+        """Not available in CLI-only mode."""
+        raise NotImplementedError("References not available in CLI-only mode")
 
     async def shutdown_all(self) -> None:
         """Shutdown all backends.
@@ -161,6 +196,30 @@ class HybridSelector(BackendSelector):
         """
         return self._get_lsp()
 
+    async def get_completion_backend(self, path: Path) -> CompletionBackend:
+        """
+        Return LSP client for completion operations.
+
+        Args:
+            path: File being analyzed
+
+        Returns:
+            LSPClient instance
+        """
+        return self._get_lsp()
+
+    async def get_references_backend(self, path: Path) -> ReferencesBackend:
+        """
+        Return LSP client for references operations.
+
+        Args:
+            path: File being analyzed
+
+        Returns:
+            LSPClient instance
+        """
+        return self._get_lsp()
+
     async def shutdown_all(self) -> None:
         """Shutdown all backends.
 
@@ -171,11 +230,109 @@ class HybridSelector(BackendSelector):
             self._lsp = None
 
 
+class PooledSelector(BackendSelector):
+    """Phase 3 selector - CLI for type checking, pooled LSP for IDE features.
+
+    This selector uses:
+    - CLI backend for check_types (synchronous, reliable)
+    - LSP pool for hover, definition, completion, references (multi-workspace)
+
+    The LSP pool maintains up to N clients (configurable, default 3) with LRU
+    eviction for multi-workspace support. This enables efficient handling of
+    multiple workspaces without unbounded resource growth.
+    """
+
+    def __init__(self, pool: "LSPPool" | None = None) -> None:
+        """Initialize with CLI backend and optional LSP pool.
+
+        Args:
+            pool: LSPPool instance (creates default if not provided)
+        """
+        from .cli_runner import PyrightCLIRunner
+        from .lsp_pool import LSPPool
+
+        self._cli = PyrightCLIRunner()
+        self._pool = pool or LSPPool()
+
+    async def get_backend(self, path: Path) -> Backend:
+        """
+        Return CLI backend for type checking.
+
+        Args:
+            path: File or directory being analyzed
+
+        Returns:
+            PyrightCLIRunner instance
+        """
+        return self._cli
+
+    async def get_hover_backend(self, path: Path) -> HoverBackend:
+        """
+        Return pooled LSP client for hover operations.
+
+        Args:
+            path: File being analyzed
+
+        Returns:
+            LSPClient from pool
+        """
+        # In Phase 3, we need context to determine workspace
+        # For now, use parent directory as heuristic
+        workspace = path.parent if path.is_file() else path
+        return await self._pool.get_client(workspace)
+
+    async def get_definition_backend(self, path: Path) -> DefinitionBackend:
+        """
+        Return pooled LSP client for definition operations.
+
+        Args:
+            path: File being analyzed
+
+        Returns:
+            LSPClient from pool
+        """
+        workspace = path.parent if path.is_file() else path
+        return await self._pool.get_client(workspace)
+
+    async def get_completion_backend(self, path: Path) -> CompletionBackend:
+        """
+        Return pooled LSP client for completion operations.
+
+        Args:
+            path: File being analyzed
+
+        Returns:
+            LSPClient from pool
+        """
+        workspace = path.parent if path.is_file() else path
+        return await self._pool.get_client(workspace)
+
+    async def get_references_backend(self, path: Path) -> ReferencesBackend:
+        """
+        Return pooled LSP client for references operations.
+
+        Args:
+            path: File being analyzed
+
+        Returns:
+            LSPClient from pool
+        """
+        workspace = path.parent if path.is_file() else path
+        return await self._pool.get_client(workspace)
+
+    async def shutdown_all(self) -> None:
+        """Shutdown all backends.
+
+        Shuts down all LSP clients in the pool. CLI backend is stateless.
+        """
+        await self._pool.shutdown_all()
+
+
 # Import for type checking only
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .lsp_client import LSPClient
+    from .lsp_pool import LSPPool
 
 
 # Singleton selector instance

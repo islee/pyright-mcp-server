@@ -352,3 +352,57 @@ class CompletionBackend(Protocol):
             BackendError: If operation fails
         """
         ...
+
+
+@dataclass
+class ReferencesResult:
+    """Result from find_references operation.
+
+    Attributes:
+        references: List of locations where symbol is referenced
+    """
+
+    references: list[Location]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for MCP response.
+
+        Returns:
+            Dictionary with status="success" and references list
+        """
+        return {
+            "status": "success",
+            "references": [ref.to_dict() for ref in self.references],
+            "count": len(self.references),
+        }
+
+
+class ReferencesBackend(Protocol):
+    """Protocol for backends that support find references."""
+
+    async def references(
+        self,
+        file: Path,
+        line: int,
+        column: int,
+        *,
+        project_root: Path | None = None,
+        include_declaration: bool = True,
+    ) -> ReferencesResult:
+        """
+        Find all references to symbol at a position.
+
+        Args:
+            file: Path to the file
+            line: 0-indexed line number
+            column: 0-indexed column number
+            project_root: Optional project root for configuration
+            include_declaration: Include declaration in results
+
+        Returns:
+            ReferencesResult with list of reference locations
+
+        Raises:
+            BackendError: If operation fails
+        """
+        ...

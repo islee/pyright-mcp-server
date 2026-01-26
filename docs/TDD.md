@@ -1260,6 +1260,27 @@ def main():
 # setup_logging()  # DON'T call at import time
 ```
 
+**Defensive Initialization (ADR-002):**
+
+To support alternative entry points (testing, embedding), `create_mcp_server()` includes defensive logging initialization:
+
+```python
+# server.py
+def create_mcp_server() -> FastMCP:
+    """Create and configure the MCP server."""
+    # Defensive logging initialization
+    # If already initialized (via __main__.py), this is a no-op
+    if not logging.getLogger('pyright_mcp').hasHandlers():
+        from .logging_config import setup_logging
+        setup_logging()
+
+    mcp = FastMCP("pyright-mcp")
+    # ... tool registration ...
+    return mcp
+```
+
+This makes the server resilient to direct imports while maintaining explicit initialization in `__main__.py` for clarity.
+
 ```python
 import logging
 import json
@@ -1595,7 +1616,8 @@ Or for development:
    - Raw JSON-RPC over stdin/stdout (no pygls dependency)
    - Lifecycle states: `not_started` → `initializing` → `ready` → `shutdown`
    - Lazy initialization on first hover/definition request
-   - Idle timeout: shutdown after 5 minutes of inactivity
+   - Idle timeout: automatic shutdown after 5 minutes of inactivity (ADR-001, ADR-005)
+   - Background watcher task checks every 60 seconds
    - Crash recovery: restart on next request
 
 3. **Document Manager**
@@ -1650,10 +1672,40 @@ src/pyright_mcp/
 - ErrorCode enum standardization
 - LSP integration tests with recorded fixtures
 
+**Idle Timeout Enforcement (ADR-001):**
+
+Automatic enforcement via background watcher task:
+
+```python
+# lsp_client.py
+async def _idle_timeout_watcher(self) -> None:
+    """Check idle timeout every 60 seconds."""
+    while self._state == LSPState.READY:
+        await asyncio.sleep(60)
+
+        idle_time = time.time() - self._process.last_activity
+        if idle_time >= self.config.lsp_timeout:
+            logger.info(f"Idle timeout ({idle_time:.1f}s)")
+            await self._shutdown_internal()
+```
+
+**Lifecycle:**
+- Starts: When LSP transitions to READY state
+- Checks: Every 60 seconds
+- Stops: When LSP state changes (shutdown, crash) or timeout fires
+
+**No manual intervention required** - timeout is enforced automatically.
+
+**Timeout Strategy (ADR-005):**
+- Single configurable timeout (no adaptive logic)
+- Default: 300 seconds (5 minutes)
+- Configuration: `PYRIGHT_MCP_LSP_TIMEOUT`
+- Activity tracked on: hover, definition, complete (Phase 3)
+
 **NOT in Phase 2 scope:**
-- LSP for check_types (architectural mismatch)
+- LSP for check_types (architectural mismatch - publishDiagnostics is async notification)
 - Completions (Phase 3)
-- Result caching (Phase 3)
+- Result caching (removed from roadmap per ADR-006)
 - Multi-workspace LSP pooling (Phase 3)
 
 ### 14.3 Phase 3: Completions, References, and Multi-Workspace Support
@@ -1661,6 +1713,23 @@ src/pyright_mcp/
 **Scope:** Complete IDE feature set; production-ready multi-workspace support
 
 **Prerequisites:** Phase 2 complete (LSP client, document manager, hover, definition)
+
+**Design Decisions (2026-01-26):**
+
+Based on architectural review and user requirements:
+
+| Decision | Choice | ADR | Rationale |
+|----------|--------|-----|-----------|
+| **LSP pool size** | Default 3, monitor usage | ADR-004 | Covers typical workflows; tune based on metrics |
+| **Timeout strategy** | Single configurable timeout | ADR-005 | Simple, predictable; no adaptive logic |
+| **Caching** | No tool-level cache | ADR-006 | LSP internal cache sufficient; avoid complexity |
+| **Metrics granularity** | Per-workspace tracking | ADR-003 | Workspace-specific performance insights |
+| **Version tracking** | Check in health_check | ADR-002 | Early incompatibility detection |
+
+**Removed from Scope:**
+- ~~Result caching layer~~ - LSP handles internally (ADR-006)
+- ~~Adaptive timeout~~ - Single timeout sufficient (ADR-005)
+- ~~Rate limiting~~ - MCP client is single-user (stdio transport)
 
 **Features:**
 
@@ -1675,22 +1744,28 @@ src/pyright_mcp/
    - Return all locations where symbol is used
    - Option to include/exclude declaration
 
-3. **Multi-Workspace LSP Pool**
+3. **Multi-Workspace LSP Pool** (ADR-004)
    - Pool of LSP clients, one per workspace root
    - LRU eviction when at capacity (default: 3 instances)
    - Per-workspace document managers
    - Graceful shutdown of evicted clients
+   - Usage tracking (cache hits, evictions, workspace switches)
 
-4. **Performance Metrics**
-   - Track per-operation latencies (count, avg, min, max)
-   - Error rate tracking
+4. **Per-Workspace Metrics** (ADR-003)
+   - Track per-workspace operation counts and latencies
+   - Error rate tracking per workspace
    - Expose via health_check tool
-   - Context manager for easy integration
+   - Guides LSP pool tuning and per-project optimization
 
 5. **get_signature Tool** (Optional)
    - Use `textDocument/signatureHelp` LSP request
    - Display function signatures during argument entry
    - Track active parameter position
+
+6. **Enhanced Health Check** (ADR-002, ADR-004)
+   - Pyright version detection and compatibility check
+   - LSP pool statistics (size, workspaces, cache hit rate)
+   - Per-workspace performance metrics
 
 **New Files:**
 ```
@@ -1708,24 +1783,35 @@ src/pyright_mcp/
 - `backends/base.py` - Add CompletionResult, CompletionItem, CompletionBackend, ReferencesBackend
 - `backends/lsp_client.py` - Add complete(), references(), signature() methods
 - `backends/selector.py` - Add PooledSelector
-- `tools/health_check.py` - Add metrics and pool status
+- `tools/health_check.py` - Add Pyright version check, metrics, pool status
+- `metrics.py` - WorkspaceMetrics, MetricsCollector classes
 
 **Environment Variables:**
 ```bash
-PYRIGHT_MCP_LSP_POOL_SIZE=3       # Max LSP instances (default: 3)
-PYRIGHT_MCP_METRICS_ENABLED=true  # Enable metrics collection (default: true)
+PYRIGHT_MCP_LSP_POOL_SIZE=3       # Max LSP instances (default: 3, see ADR-004)
+PYRIGHT_MCP_LSP_TIMEOUT=300       # Idle timeout in seconds (default: 300, see ADR-005)
 ```
 
 **Deliverables:**
 - `get_completions` tool via LSP
 - `find_references` tool via LSP
-- Multi-workspace LSP pooling with LRU eviction
-- Performance metrics with health_check integration
+- Multi-workspace LSP pooling with LRU eviction and usage tracking
+- Per-workspace performance metrics
+- Enhanced health_check with version detection and pool stats
 - `get_signature` tool (optional)
 - PooledSelector for production deployments
 
-**NOT in Phase 3 scope (potential future work):**
-- Result caching (LSP handles this internally)
+**Monitoring & Tuning:**
+- Cache hit rate tracking (guides pool size adjustment)
+- Eviction count tracking (identifies undersized pool)
+- Per-workspace latency tracking (identifies slow projects)
+- Pyright version compatibility warnings
+
+See ADR-003, ADR-004 for tuning guidelines.
+
+**NOT in Phase 3 scope (confirmed exclusions):**
+- Result caching (LSP handles internally - ADR-006)
+- Adaptive timeout (single timeout sufficient - ADR-005)
 - Rate limiting (single-client MCP doesn't need it)
 - HTTP/SSE transports (stdio sufficient for Claude Code)
 - Rename refactoring (complex, requires file writes)
@@ -1743,3 +1829,4 @@ PYRIGHT_MCP_METRICS_ENABLED=true  # Enable metrics collection (default: true)
 | 0.4 | 2026-01-21 | Claude Code | Added Section 4.4 (Input Validation), Section 5.1.1 (Configuration Module), Section 5.9 (Health Check Tool), Section 6.3 (Cancellation Support). Updated Section 5.2 (async project detection), Section 5.3 (ErrorCode enum), Section 8.1 (new env vars: ALLOWED_PATHS, ENABLE_HEALTH_CHECK, TRANSPORT). Expanded Section 14 with detailed Phase 2 (LSP for all tools, document manager, backend selection) and Phase 3 (completions, caching, rate limiting, transports, metrics, LSP pooling) implementation plans. |
 | 0.5 | 2026-01-22 | Claude Code | **Phase 2 revision:** Removed LSP for check_types (publishDiagnostics is async notification, not request). Phase 2 now focused on hover and definition only. Added protocol extension (HoverBackend, DefinitionBackend), document manager concurrency handling, HybridSelector. **Phase 3 revision:** Replaced caching/rate-limiting/transports with completions, references, multi-workspace LSP pooling, and performance metrics. Added PooledSelector and optional signature help. |
 | 0.6 | 2026-01-22 | Claude Code | **Section 3 update:** Changed MCP Tool API from 0-indexed to 1-indexed positions. Rationale: 1-indexed matches editor display, improving UX when users navigate to reported locations. Internal data structures remain 0-indexed for Pyright compatibility. Added conversion boundary documentation. |
+| 0.7 | 2026-01-26 | Claude Code | **Architecture refinement:** Added ADRs for Phase 2.5 and Phase 3 design decisions. Section 8.2: Defensive logging initialization. Section 14.2: Automatic idle timeout enforcement via background watcher. Section 14.3: Phase 3 design decisions (per-workspace metrics, LSP pool sizing, simplified timeout, no tool-level cache). See docs/decisions/ for detailed ADRs. |
